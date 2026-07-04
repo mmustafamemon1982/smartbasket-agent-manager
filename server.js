@@ -1,7 +1,7 @@
 // server.js
 // SmartBasket Agent Manager backend.
-// This runs privately on a server. Customer website reads /api/prices.
-// Agent runs scheduled or manually via /api/agent/run?key=...
+// Agent manages prices AND store rules.
+// Customer app should read /api/prices and /api/store-rules.
 
 require("dotenv").config();
 
@@ -14,6 +14,14 @@ const port = process.env.PORT || 8787;
 
 app.use(cors());
 app.use(express.json());
+
+function adminKey(req) {
+  return req.query.key || req.headers["x-agent-run-key"];
+}
+
+function isAuthorized(req) {
+  return process.env.AGENT_RUN_KEY && adminKey(req) === process.env.AGENT_RUN_KEY;
+}
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -43,12 +51,20 @@ app.get("/api/prices", async (req, res) => {
 app.get("/api/store-rules", async (req, res) => {
   try {
     const supabase = makeSupabaseAdmin();
-    const { data, error } = await supabase
+
+    let query = supabase
       .from("store_rules")
-      .select("*")
+      .select("store,area,is_available,delivery_fee,free_delivery_above,minimum_order,updated_at")
+      .order("area", { ascending: true })
       .order("store", { ascending: true });
 
+    if (req.query.area) {
+      query = query.eq("area", String(req.query.area));
+    }
+
+    const { data, error } = await query;
     if (error) throw error;
+
     res.json({ count: data.length, rows: data });
   } catch (error) {
     res.status(500).json({ error: "STORE_RULE_FETCH_FAILED", message: error.message, rows: [] });
@@ -71,9 +87,9 @@ app.get("/api/agent/status", async (req, res) => {
   }
 });
 
+// app.all allows running from browser as well as POST tools.
 app.all("/api/agent/run", async (req, res) => {
-  const key = req.query.key || req.headers["x-agent-run-key"];
-  if (!process.env.AGENT_RUN_KEY || key !== process.env.AGENT_RUN_KEY) {
+  if (!isAuthorized(req)) {
     res.status(401).json({ error: "UNAUTHORIZED" });
     return;
   }
@@ -87,8 +103,7 @@ app.all("/api/agent/run", async (req, res) => {
 });
 
 app.post("/api/admin/price", async (req, res) => {
-  const key = req.query.key || req.headers["x-agent-run-key"];
-  if (!process.env.AGENT_RUN_KEY || key !== process.env.AGENT_RUN_KEY) {
+  if (!isAuthorized(req)) {
     res.status(401).json({ error: "UNAUTHORIZED" });
     return;
   }
@@ -96,12 +111,27 @@ app.post("/api/admin/price", async (req, res) => {
   try {
     const supabase = makeSupabaseAdmin();
     const row = {
-      ...req.body,
-      updated_at: new Date().toISOString(),
-      last_checked: new Date().toISOString(),
+      store: req.body.store,
+      item: String(req.body.item || "").toLowerCase(),
+      brand: req.body.brand || "Generic",
+      product: req.body.product,
+      size: req.body.size,
+      price: Number(req.body.price),
+      match: Number(req.body.match || 90),
+      confidence: req.body.confidence || "Medium",
       source: req.body.source || "admin_override",
-      is_active: req.body.is_active !== false
+      source_url: req.body.source_url || null,
+      last_checked: new Date().toISOString(),
+      is_active: req.body.is_active !== false,
+      needs_review: req.body.needs_review === true,
+      review_reason: req.body.review_reason || null,
+      updated_at: new Date().toISOString()
     };
+
+    if (!row.store || !row.item || !row.product || !row.size || !row.price) {
+      res.status(400).json({ error: "MISSING_FIELDS", message: "store, item, product, size and price are required" });
+      return;
+    }
 
     const { data, error } = await supabase
       .from("prices")
@@ -113,6 +143,43 @@ app.post("/api/admin/price", async (req, res) => {
     res.json({ ok: true, row: data });
   } catch (error) {
     res.status(500).json({ error: "ADMIN_PRICE_UPDATE_FAILED", message: error.message });
+  }
+});
+
+app.post("/api/admin/store-rule", async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
+  try {
+    const supabase = makeSupabaseAdmin();
+
+    const row = {
+      store: req.body.store,
+      area: req.body.area,
+      is_available: req.body.is_available !== false,
+      delivery_fee: Number(req.body.delivery_fee || 0),
+      free_delivery_above: Number(req.body.free_delivery_above || 0),
+      minimum_order: Number(req.body.minimum_order || 0),
+      updated_at: new Date().toISOString()
+    };
+
+    if (!row.store || !row.area) {
+      res.status(400).json({ error: "MISSING_FIELDS", message: "store and area are required" });
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("store_rules")
+      .upsert(row, { onConflict: "store,area" })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ ok: true, row: data });
+  } catch (error) {
+    res.status(500).json({ error: "STORE_RULE_UPDATE_FAILED", message: error.message });
   }
 });
 
