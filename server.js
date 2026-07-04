@@ -43,6 +43,41 @@ function categoryForItem(item) {
   return "Grocery";
 }
 
+
+function isNoisyCatalogRow(row) {
+  const text = [
+    row.item,
+    row.brand,
+    row.product,
+    row.size,
+    row.source
+  ].join(" ").toLowerCase();
+
+  const badPhrases = [
+    "sort by",
+    "price range",
+    "newest first",
+    "expiring soon",
+    "best match",
+    "low to high",
+    "high to low",
+    "offers in bahrain",
+    "view product",
+    "official flyer",
+    "prices are ai-generated",
+    "google_vignette",
+    "privacy policy",
+    "terms and conditions"
+  ];
+
+  if (String(row.source || "").toLowerCase().includes("fallback")) return true;
+  if (String(row.product || "").length > 85) return true;
+  if (String(row.product || "").trim().startsWith("--")) return true;
+  if (badPhrases.some((phrase) => text.includes(phrase))) return true;
+
+  return false;
+}
+
 function normalizeProductId(row) {
   return [row.item, row.brand, row.product, row.size]
     .join("-")
@@ -71,7 +106,9 @@ app.get("/api/prices", async (req, res) => {
       .order("store", { ascending: true });
 
     if (error) throw error;
-    res.json({ count: data.length, rows: data });
+
+    const rows = (data || []).filter((row) => !isNoisyCatalogRow(row));
+    res.json({ count: rows.length, rows });
   } catch (error) {
     res.status(500).json({ error: "PRICE_FETCH_FAILED", message: error.message, rows: [] });
   }
@@ -95,6 +132,7 @@ app.get("/api/products", async (req, res) => {
     const map = new Map();
 
     for (const row of data || []) {
+      if (isNoisyCatalogRow(row)) continue;
       const id = normalizeProductId(row);
       if (!map.has(id)) {
         map.set(id, {
@@ -320,6 +358,55 @@ app.post("/api/admin/store-rule", async (req, res) => {
     res.json({ ok: true, row: data });
   } catch (error) {
     res.status(500).json({ error: "STORE_RULE_UPDATE_FAILED", message: error.message });
+  }
+});
+
+
+// Deactivates noisy rows already saved from earlier fallback extraction.
+app.all("/api/admin/cleanup-noisy-prices", async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
+  try {
+    const supabase = makeSupabaseAdmin();
+
+    const { data, error } = await supabase
+      .from("prices")
+      .select("store,item,brand,product,size,source");
+
+    if (error) throw error;
+
+    const noisyRows = (data || []).filter((row) => isNoisyCatalogRow(row));
+    let deactivated = 0;
+
+    for (const row of noisyRows) {
+      const { error: updateError } = await supabase
+        .from("prices")
+        .update({
+          is_active: false,
+          needs_review: true,
+          review_reason: "Removed noisy category/fallback extraction",
+          updated_at: new Date().toISOString()
+        })
+        .eq("store", row.store)
+        .eq("item", row.item)
+        .eq("brand", row.brand)
+        .eq("product", row.product)
+        .eq("size", row.size);
+
+      if (!updateError) deactivated += 1;
+    }
+
+    res.json({
+      ok: true,
+      scanned: (data || []).length,
+      noisy_found: noisyRows.length,
+      deactivated
+    });
+  } catch (error) {
+    res.status(500).json({ error: "CLEANUP_FAILED", message: error.message });
   }
 });
 
