@@ -1,8 +1,10 @@
 // connectors/d4dRequestSearchConnector.js
-// SmartBasket v5 request-specific online price search.
-// This does NOT crawl all groceries.
-// It searches only the items the customer asked for and creates honest "price card" rows.
-// If the source page does not expose exact product names, the product is labelled as a requested item offer.
+// SmartBasket v6 request-specific online price search.
+// Fixes v5 by using Node's built-in HTTPS client instead of global fetch.
+// Also keeps diagnostics so we can see whether D4D returned product cards to Render.
+
+const https = require("https");
+const http = require("http");
 
 const BASE = "https://d4donline.com/en/bahrain/bahrain";
 
@@ -32,56 +34,38 @@ const STORE_NAMES = [
   "Muntaza",
   "Day to Day Discount Center",
   "Multi Market",
-  "Talabat Mart",
-  "D4D Store"
+  "Talabat Mart"
 ];
 
 const ITEM_SEARCH_CONFIG = {
   eggs: [
-    { label: "Eggs", url: `${BASE}/products/114/eggs` },
-    { label: "Eggs", url: `${BASE}/products/114/eggs?search=egg` }
+    { label: "Eggs", url: `${BASE}/products/114/eggs` }
   ],
   bread: [
-    { label: "Bread & Buns", url: `${BASE}/products/76/bread-buns` },
-    { label: "Bread & Buns", url: `${BASE}/products/76/bread-buns?search=lusine` },
-    { label: "Bread & Buns", url: `${BASE}/products/76/bread-buns?search=bread` }
+    { label: "Bread & Buns", url: `${BASE}/products/76/bread-buns` }
   ],
   croissants: [
-    { label: "Cakes & Pastry", url: `${BASE}/products/8/cakes-pastry?search=croissant` },
     { label: "Cakes & Pastry", url: `${BASE}/products/8/cakes-pastry` },
-    { label: "Bread & Buns", url: `${BASE}/products/76/bread-buns?search=croissant` }
+    { label: "Bread & Buns", url: `${BASE}/products/76/bread-buns` }
   ],
   milk: [
-    { label: "Milk & Laban", url: `${BASE}/products/40/milk-laban` },
-    { label: "Milk & Laban", url: `${BASE}/products/40/milk-laban?search=milk` }
+    { label: "Milk & Laban", url: `${BASE}/products/40/milk-laban` }
   ],
   water: [
-    { label: "Water", url: `${BASE}/products/102/water` },
-    { label: "Drinks & Beverages", url: `${BASE}/products?search=water` }
+    { label: "Water", url: `${BASE}/products/102/water` }
   ],
   rice: [
-    { label: "Rice", url: `${BASE}/products/66/rice` },
-    { label: "Rice", url: `${BASE}/products?search=rice` }
-  ],
-  chicken: [
-    { label: "Chicken", url: `${BASE}/products?search=chicken` }
-  ],
-  oil: [
-    { label: "Oil & Ghee", url: `${BASE}/products?search=oil` }
+    { label: "Rice", url: `${BASE}/products/66/rice` }
   ],
   tissue: [
-    { label: "Tissue & Disposables", url: `${BASE}/products/111/tissue-disposables` },
-    { label: "Tissue", url: `${BASE}/products?search=tissue` }
+    { label: "Toilet & Paper Tissue", url: `${BASE}/products/107/toilet-paper-tissue` }
   ],
   diapers: [
-    { label: "Baby Diapers", url: `${BASE}/products/44/baby-diapers` },
-    { label: "Baby Diapers", url: `${BASE}/products?search=diaper` }
-  ],
-  detergent: [
-    { label: "Laundry", url: `${BASE}/products?search=detergent` },
-    { label: "Laundry", url: `${BASE}/products?search=laundry` }
+    { label: "Baby Diapers", url: `${BASE}/products/44/baby-diapers` }
   ]
 };
+
+let lastDiagnostics = [];
 
 function cleanText(value) {
   return String(value || "")
@@ -93,21 +77,6 @@ function cleanText(value) {
     .trim();
 }
 
-function normalizeStoreName(text) {
-  const value = cleanText(text);
-  const lower = value.toLowerCase();
-
-  for (const store of STORE_NAMES) {
-    if (lower.includes(store.toLowerCase())) {
-      if (store === "Lulu Hypermarket") return "LuLu Hypermarket";
-      if (store === "Nesto") return "NESTO";
-      return store;
-    }
-  }
-
-  return "D4D Store";
-}
-
 function stripHtml(html) {
   return cleanText(
     String(html || "")
@@ -117,22 +86,60 @@ function stripHtml(html) {
   );
 }
 
-async function fetchPage(url) {
-  const response = await fetch(url, {
-    headers: {
-      "user-agent": "Mozilla/5.0 SmartBasketBH/1.0",
-      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "accept-language": "en-BH,en;q=0.9,ar-BH;q=0.8"
+function normalizeStoreName(text) {
+  const lower = cleanText(text).toLowerCase();
+
+  for (const store of STORE_NAMES) {
+    if (lower.includes(store.toLowerCase())) {
+      if (store === "Lulu Hypermarket") return "LuLu Hypermarket";
+      if (store === "Nesto") return "NESTO";
+      return store;
     }
-  });
-
-  const html = await response.text();
-
-  if (!response.ok) {
-    throw new Error(`D4D returned HTTP ${response.status}`);
   }
 
-  return html;
+  return null;
+}
+
+function requestText(url, redirectsLeft = 3) {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith("https:") ? https : http;
+
+    const req = lib.get(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 SmartBasketBH/1.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-BH,en;q=0.9,ar-BH;q=0.8",
+        "Cache-Control": "no-cache"
+      },
+      timeout: 15000
+    }, (res) => {
+      const status = res.statusCode || 0;
+
+      if ([301, 302, 303, 307, 308].includes(status) && res.headers.location && redirectsLeft > 0) {
+        const next = new URL(res.headers.location, url).toString();
+        res.resume();
+        requestText(next, redirectsLeft - 1).then(resolve).catch(reject);
+        return;
+      }
+
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { data += chunk; });
+      res.on("end", () => {
+        resolve({
+          status,
+          finalUrl: url,
+          html: data
+        });
+      });
+    });
+
+    req.on("timeout", () => {
+      req.destroy(new Error("Request timed out"));
+    });
+
+    req.on("error", reject);
+  });
 }
 
 function pageLooksExpiredOrUnavailable(html) {
@@ -145,30 +152,31 @@ function pageLooksExpiredOrUnavailable(html) {
   );
 }
 
-function visibleCurrentPrice(segment) {
-  const prices = Array.from(
-    String(segment || "").matchAll(/\b(?:BD|BHD)\s*([0-9]+(?:\.[0-9]{1,3})?)/gi)
-  ).map((m) => Number(m[1])).filter((n) => Number.isFinite(n) && n > 0);
+function pricesFromText(text) {
+  return Array.from(
+    String(text || "").matchAll(/\b(?:BHD|BD)\s*([0-9]+(?:\.[0-9]{1,3})?)/gi)
+  )
+    .map((m) => Number(m[1]))
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
 
+function visibleCurrentPrice(segment) {
+  const prices = pricesFromText(segment);
   if (!prices.length) return null;
 
-  // On D4D cards the old price often appears before the offer price.
-  // Use the last visible price as the current/sale price.
+  // D4D commonly shows old price then current price. Use last price on card.
   return prices[prices.length - 1];
 }
 
 function visibleOriginalPrice(segment) {
-  const prices = Array.from(
-    String(segment || "").matchAll(/\b(?:BD|BHD)\s*([0-9]+(?:\.[0-9]{1,3})?)/gi)
-  ).map((m) => Number(m[1])).filter((n) => Number.isFinite(n) && n > 0);
-
+  const prices = pricesFromText(segment);
   if (prices.length >= 2) return prices[0];
   return null;
 }
 
 function inferSizeFromRequest(item) {
   if (item.item === "eggs" && Number(item.quantity || 0) >= 12) {
-    return `${Number(item.quantity)} pcs`;
+    return `${Number(item.quantity)} pcs requested`;
   }
 
   if (item.unit && item.unit !== "pcs") {
@@ -178,11 +186,11 @@ function inferSizeFromRequest(item) {
   return "price card";
 }
 
-function requestedProductLabel(item, categoryLabel) {
+function requestedProductLabel(item) {
   const requested = cleanText(item.phrase || item.item || "grocery item");
 
   if (item.item === "eggs" && Number(item.quantity || 0) >= 12) {
-    return `${requested} offer - requested ${Number(item.quantity)} pcs`;
+    return `${requested} offer`;
   }
 
   if (item.brand && item.brand !== "Any" && !requested.toLowerCase().includes(item.brand.toLowerCase())) {
@@ -201,28 +209,24 @@ function brandFromItem(item) {
   return "Generic";
 }
 
-function extractPriceCardsFromHtml(html, item, sourceConfig, limit) {
-  const text = stripHtml(html);
+function extractRowsFromText(text, item, sourceConfig, limit) {
   const rows = [];
   const seen = new Set();
 
-  // D4D visible pages are often text like:
-  // View Product 19.2 % Off BHD 1.720 BHD 1.390 HyperMax
-  // Split by View Product and parse each visible card.
-  const segments = text.split(/View Product/i).slice(1);
+  // Use "View Product" as card separator. D4D server-readable text exposes cards this way.
+  const pieces = String(text || "").split(/View Product/i).slice(1);
 
-  for (const raw of segments) {
+  for (const raw of pieces) {
     if (rows.length >= limit) break;
 
-    const segment = cleanText(raw.slice(0, 350));
-    if (!segment || segment.length < 8) continue;
+    const segment = cleanText(raw.slice(0, 450));
+    if (!segment) continue;
 
     const lower = segment.toLowerCase();
     if (
       lower.includes("sort by") ||
       lower.includes("price range") ||
       lower.includes("view more products") ||
-      lower.includes("login") ||
       lower.includes("privacy policy") ||
       lower.includes("terms of service")
     ) {
@@ -233,10 +237,10 @@ function extractPriceCardsFromHtml(html, item, sourceConfig, limit) {
     if (!price) continue;
 
     const store = normalizeStoreName(segment);
-    if (store === "D4D Store") continue;
+    if (!store) continue;
 
     const originalPrice = visibleOriginalPrice(segment);
-    const product = requestedProductLabel(item, sourceConfig.label);
+    const product = requestedProductLabel(item);
     const size = inferSizeFromRequest(item);
     const brand = brandFromItem(item);
 
@@ -252,7 +256,7 @@ function extractPriceCardsFromHtml(html, item, sourceConfig, limit) {
       size,
       price,
       original_price: originalPrice,
-      match: item.brand && item.brand !== "Any" ? 70 : 76,
+      match: item.brand && item.brand !== "Any" ? 70 : 78,
       confidence: "Low",
       source: "requested_item_online_price_card",
       source_url: sourceConfig.url,
@@ -268,26 +272,15 @@ function extractPriceCardsFromHtml(html, item, sourceConfig, limit) {
 
 function configsForItem(item) {
   const key = String(item.item || "").toLowerCase();
-  const base = ITEM_SEARCH_CONFIG[key] || [
+  return ITEM_SEARCH_CONFIG[key] || [
     { label: item.phrase || item.item || "Grocery", url: `${BASE}/products?search=${encodeURIComponent(item.phrase || item.item || "grocery")}` }
   ];
-
-  // For brand-specific requests, prefer an on-page search URL first.
-  if (item.brand && item.brand !== "Any") {
-    const brandSearch = encodeURIComponent(item.brand);
-    const first = base[0];
-    return [
-      { label: first.label, url: `${first.url.split("?")[0]}?search=${brandSearch}` },
-      ...base
-    ];
-  }
-
-  return base;
 }
 
 async function fetchD4DRequestRows(items, { limitPerItem = 8 } = {}) {
   const all = [];
   const seen = new Set();
+  const diagnostics = [];
 
   for (const item of items || []) {
     const configs = configsForItem(item);
@@ -295,11 +288,45 @@ async function fetchD4DRequestRows(items, { limitPerItem = 8 } = {}) {
     for (const config of configs) {
       if (all.filter((row) => row.item === item.item).length >= limitPerItem) break;
 
-      try {
-        const html = await fetchPage(config.url);
-        if (pageLooksExpiredOrUnavailable(html)) continue;
+      const diag = {
+        item: item.item,
+        url: config.url,
+        status: null,
+        html_length: 0,
+        text_length: 0,
+        view_product_count: 0,
+        price_count: 0,
+        rows_extracted: 0,
+        expired_or_unavailable: false,
+        error: null,
+        excerpt: null
+      };
 
-        const rows = extractPriceCardsFromHtml(html, item, config, limitPerItem);
+      try {
+        const result = await requestText(config.url);
+        diag.status = result.status;
+        diag.html_length = result.html.length;
+
+        if (result.status < 200 || result.status >= 400) {
+          diag.error = `HTTP ${result.status}`;
+          diagnostics.push(diag);
+          continue;
+        }
+
+        const text = stripHtml(result.html);
+        diag.text_length = text.length;
+        diag.view_product_count = (text.match(/View Product/gi) || []).length;
+        diag.price_count = pricesFromText(text).length;
+        diag.expired_or_unavailable = pageLooksExpiredOrUnavailable(result.html);
+        diag.excerpt = text.slice(0, 300);
+
+        if (diag.expired_or_unavailable) {
+          diagnostics.push(diag);
+          continue;
+        }
+
+        const rows = extractRowsFromText(text, item, config, limitPerItem);
+        diag.rows_extracted = rows.length;
 
         for (const row of rows) {
           const key = `${row.store}|${row.item}|${row.brand}|${row.product}|${row.size}|${row.price}`;
@@ -308,15 +335,24 @@ async function fetchD4DRequestRows(items, { limitPerItem = 8 } = {}) {
             all.push(row);
           }
         }
+
+        diagnostics.push(diag);
       } catch (error) {
-        console.warn(`D4D request search failed for ${config.url}:`, error.message);
+        diag.error = error.message;
+        diagnostics.push(diag);
       }
     }
   }
 
+  lastDiagnostics = diagnostics;
   return all;
 }
 
+function getLastD4DRequestDiagnostics() {
+  return lastDiagnostics;
+}
+
 module.exports = {
-  fetchD4DRequestRows
+  fetchD4DRequestRows,
+  getLastD4DRequestDiagnostics
 };
