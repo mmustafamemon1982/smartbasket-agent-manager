@@ -1,13 +1,13 @@
 // server.js
 // SmartBasket Agent Manager backend.
-// Agent manages prices AND store rules.
-// Customer app should read /api/prices and /api/store-rules.
+// Agent manages online fetch, prices, store rules, and dynamic product catalogue.
 
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
 const { runAgentOnce, makeSupabaseAdmin } = require("./agent");
+const { fetchLuLuOnlineProducts } = require("./connectors/luluOnlineConnector");
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -21,6 +21,34 @@ function adminKey(req) {
 
 function isAuthorized(req) {
   return process.env.AGENT_RUN_KEY && adminKey(req) === process.env.AGENT_RUN_KEY;
+}
+
+function categoryForItem(item) {
+  const value = String(item || "").toLowerCase();
+
+  if (["milk", "yogurt", "cheese", "butter", "cream", "laban", "labneh"].includes(value)) return "Dairy";
+  if (["eggs", "bread", "coffee", "cereal", "tea"].includes(value)) return "Breakfast";
+  if (["rice", "pasta", "flour", "sugar", "oil", "olive oil", "salt"].includes(value)) return "Staples";
+  if (["chicken", "beef", "mutton", "fish"].includes(value)) return "Meat";
+  if (["bananas", "banana", "apple", "apples", "tomato", "potato", "onion"].includes(value)) return "Produce";
+  if (["detergent", "dishwash", "tissue", "cleaner"].includes(value)) return "Cleaning";
+  if (["water", "juice", "soft drink", "cola"].includes(value)) return "Drinks";
+  if (["diapers", "baby wipes", "formula"].includes(value)) return "Baby";
+
+  return "Grocery";
+}
+
+function normalizeProductId(row) {
+  return [
+    row.item,
+    row.brand,
+    row.product,
+    row.size
+  ]
+    .join("-")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
 }
 
 app.get("/api/health", (req, res) => {
@@ -45,6 +73,49 @@ app.get("/api/prices", async (req, res) => {
     res.json({ count: data.length, rows: data });
   } catch (error) {
     res.status(500).json({ error: "PRICE_FETCH_FAILED", message: error.message, rows: [] });
+  }
+});
+
+app.get("/api/products", async (req, res) => {
+  try {
+    const supabase = makeSupabaseAdmin();
+
+    const { data, error } = await supabase
+      .from("prices")
+      .select("item,brand,product,size,is_active,needs_review")
+      .eq("is_active", true)
+      .eq("needs_review", false)
+      .order("item", { ascending: true })
+      .order("brand", { ascending: true })
+      .order("product", { ascending: true });
+
+    if (error) throw error;
+
+    const map = new Map();
+
+    for (const row of data || []) {
+      const id = normalizeProductId(row);
+      if (!map.has(id)) {
+        map.set(id, {
+          id,
+          category: categoryForItem(row.item),
+          item: row.item,
+          brand: row.brand || "Generic",
+          product: row.product,
+          size: row.size
+        });
+      }
+    }
+
+    const rows = Array.from(map.values()).sort((a, b) => {
+      const ca = `${a.category} ${a.item} ${a.brand} ${a.product} ${a.size}`;
+      const cb = `${b.category} ${b.item} ${b.brand} ${b.product} ${b.size}`;
+      return ca.localeCompare(cb);
+    });
+
+    res.json({ count: rows.length, rows });
+  } catch (error) {
+    res.status(500).json({ error: "PRODUCT_FETCH_FAILED", message: error.message, rows: [] });
   }
 });
 
@@ -87,7 +158,24 @@ app.get("/api/agent/status", async (req, res) => {
   }
 });
 
-// app.all allows running from browser as well as POST tools.
+// Test connector without saving rows.
+app.get("/api/agent/fetch-online", async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
+  try {
+    const query = String(req.query.query || "milk");
+    const limit = Number(req.query.limit || 12);
+    const rows = await fetchLuLuOnlineProducts({ query, limit });
+    res.json({ ok: true, store: "LuLu", query, count: rows.length, rows });
+  } catch (error) {
+    res.status(500).json({ error: "ONLINE_FETCH_FAILED", message: error.message });
+  }
+});
+
+// Run agent and save fetched rows.
 app.all("/api/agent/run", async (req, res) => {
   if (!isAuthorized(req)) {
     res.status(401).json({ error: "UNAUTHORIZED" });
