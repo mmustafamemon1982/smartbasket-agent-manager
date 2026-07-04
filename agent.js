@@ -7,7 +7,7 @@
 // 5. Flags suspicious rows for review
 
 const { createClient } = require("@supabase/supabase-js");
-const { fetchSampleAgentFeed } = require("./connectors/sampleAgentFeed");
+const { fetchSampleAgentFeed } = require("./sampleAgentFeed");
 
 function makeSupabaseAdmin() {
   const url = process.env.SUPABASE_URL;
