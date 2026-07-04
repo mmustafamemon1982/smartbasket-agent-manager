@@ -1,13 +1,18 @@
 // server.js
 // SmartBasket Agent Manager backend.
-// Active source: D4D Bahrain special-price aggregator.
-// LuLu direct connector can be kept in repo but is disabled by default.
+// Active source: D4D Bahrain category crawler.
+// Customer app reads /api/products, /api/prices, and /api/store-rules.
 
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const { runAgentOnce, makeSupabaseAdmin, fetchD4DPreview } = require("./agent");
+const {
+  runAgentOnce,
+  makeSupabaseAdmin,
+  fetchD4DCategoryPreview,
+  listD4DCategoriesPreview
+} = require("./agent");
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -25,14 +30,16 @@ function isAuthorized(req) {
 
 function categoryForItem(item) {
   const value = String(item || "").toLowerCase();
-  if (["milk", "yogurt", "cheese", "butter", "cream", "laban", "labneh"].includes(value)) return "Dairy";
-  if (["eggs", "bread", "coffee", "cereal", "tea"].includes(value)) return "Breakfast";
-  if (["rice", "pasta", "flour", "sugar", "oil", "olive oil", "salt"].includes(value)) return "Staples";
-  if (["chicken", "beef", "mutton", "fish"].includes(value)) return "Meat";
-  if (["bananas", "banana", "apple", "apples", "tomato", "potato", "onion"].includes(value)) return "Produce";
-  if (["detergent", "dishwash", "tissue", "cleaner"].includes(value)) return "Cleaning";
-  if (["water", "juice", "soft drink", "cola"].includes(value)) return "Drinks";
-  if (["diapers", "baby wipes", "formula"].includes(value)) return "Baby";
+
+  if (["milk", "yogurt", "cheese", "butter", "cream", "laban", "labneh", "dairy", "eggs"].includes(value)) return "Dairy & Eggs";
+  if (["rice", "pasta", "flour", "sugar", "oil", "olive oil", "salt", "grocery", "food"].includes(value)) return "Food - Grocery";
+  if (["chicken", "beef", "mutton", "fish", "meat", "poultry"].includes(value)) return "Chicken, Meat & Fish";
+  if (["bananas", "banana", "apple", "apples", "tomato", "potato", "onion", "vegetable", "fruit"].includes(value)) return "Fruits & Vegetable";
+  if (["detergent", "dishwash", "tissue", "cleaner", "laundry", "cleaning"].includes(value)) return "Laundry & Cleaning";
+  if (["water", "juice", "soft drink", "cola", "drinks", "beverages"].includes(value)) return "Drinks & Beverages";
+  if (["bread", "bakery", "biscuits", "snacks", "chocolate"].includes(value)) return "Bakery & Snacks";
+  if (["diapers", "baby wipes", "formula", "baby"].includes(value)) return "Baby & Mom Care";
+
   return "Grocery";
 }
 
@@ -45,7 +52,12 @@ function normalizeProductId(row) {
 }
 
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "smartbasket-agent-manager", active_source: "d4d", time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    service: "smartbasket-agent-manager",
+    active_source: "d4d_category_crawler",
+    time: new Date().toISOString()
+  });
 });
 
 app.get("/api/prices", async (req, res) => {
@@ -57,6 +69,7 @@ app.get("/api/prices", async (req, res) => {
       .eq("is_active", true)
       .eq("needs_review", false)
       .order("store", { ascending: true });
+
     if (error) throw error;
     res.json({ count: data.length, rows: data });
   } catch (error) {
@@ -67,6 +80,7 @@ app.get("/api/prices", async (req, res) => {
 app.get("/api/products", async (req, res) => {
   try {
     const supabase = makeSupabaseAdmin();
+
     const { data, error } = await supabase
       .from("prices")
       .select("item,brand,product,size,is_active,needs_review")
@@ -75,15 +89,31 @@ app.get("/api/products", async (req, res) => {
       .order("item", { ascending: true })
       .order("brand", { ascending: true })
       .order("product", { ascending: true });
+
     if (error) throw error;
+
     const map = new Map();
+
     for (const row of data || []) {
       const id = normalizeProductId(row);
       if (!map.has(id)) {
-        map.set(id, { id, category: categoryForItem(row.item), item: row.item, brand: row.brand || "Generic", product: row.product, size: row.size });
+        map.set(id, {
+          id,
+          category: categoryForItem(row.item),
+          item: row.item,
+          brand: row.brand || "Generic",
+          product: row.product,
+          size: row.size
+        });
       }
     }
-    const rows = Array.from(map.values()).sort((a, b) => `${a.category} ${a.item} ${a.brand} ${a.product} ${a.size}`.localeCompare(`${b.category} ${b.item} ${b.brand} ${b.product} ${b.size}`));
+
+    const rows = Array.from(map.values()).sort((a, b) => {
+      const ca = `${a.category} ${a.item} ${a.brand} ${a.product} ${a.size}`;
+      const cb = `${b.category} ${b.item} ${b.brand} ${b.product} ${b.size}`;
+      return ca.localeCompare(cb);
+    });
+
     res.json({ count: rows.length, rows });
   } catch (error) {
     res.status(500).json({ error: "PRODUCT_FETCH_FAILED", message: error.message, rows: [] });
@@ -93,14 +123,20 @@ app.get("/api/products", async (req, res) => {
 app.get("/api/store-rules", async (req, res) => {
   try {
     const supabase = makeSupabaseAdmin();
+
     let query = supabase
       .from("store_rules")
       .select("store,area,is_available,delivery_fee,free_delivery_above,minimum_order,updated_at")
       .order("area", { ascending: true })
       .order("store", { ascending: true });
-    if (req.query.area) query = query.eq("area", String(req.query.area));
+
+    if (req.query.area) {
+      query = query.eq("area", String(req.query.area));
+    }
+
     const { data, error } = await query;
     if (error) throw error;
+
     res.json({ count: data.length, rows: data });
   } catch (error) {
     res.status(500).json({ error: "STORE_RULE_FETCH_FAILED", message: error.message, rows: [] });
@@ -110,7 +146,12 @@ app.get("/api/store-rules", async (req, res) => {
 app.get("/api/agent/status", async (req, res) => {
   try {
     const supabase = makeSupabaseAdmin();
-    const { data, error } = await supabase.from("agent_runs").select("*").order("started_at", { ascending: false }).limit(10);
+    const { data, error } = await supabase
+      .from("agent_runs")
+      .select("*")
+      .order("started_at", { ascending: false })
+      .limit(10);
+
     if (error) throw error;
     res.json({ runs: data });
   } catch (error) {
@@ -118,33 +159,81 @@ app.get("/api/agent/status", async (req, res) => {
   }
 });
 
-app.get("/api/agent/fetch-d4d", async (req, res) => {
-  if (!isAuthorized(req)) return res.status(401).json({ error: "UNAUTHORIZED" });
+// Shows categories discovered by the D4D connector.
+app.get("/api/agent/d4d-categories", async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
   try {
-    const query = String(req.query.query || "milk");
-    const limit = Number(req.query.limit || 20);
-    const rows = await fetchD4DPreview({ query, limit });
-    res.json({ ok: true, source: "D4D", query, count: rows.length, rows });
+    const categories = await listD4DCategoriesPreview();
+    res.json({ ok: true, count: categories.length, categories });
+  } catch (error) {
+    res.status(500).json({ error: "D4D_CATEGORY_LIST_FAILED", message: error.message });
+  }
+});
+
+// Tests category crawling without saving rows.
+app.get("/api/agent/fetch-d4d-categories", async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
+  try {
+    const limitCategories = Number(req.query.limitCategories || 8);
+    const limitPerCategory = Number(req.query.limitPerCategory || 20);
+    const result = await fetchD4DCategoryPreview({ limitCategories, limitPerCategory });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(500).json({ error: "D4D_CATEGORY_FETCH_FAILED", message: error.message });
+  }
+});
+
+// Backward-compatible preview endpoint.
+// It now uses category mode by default.
+app.get("/api/agent/fetch-d4d", async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
+  try {
+    const limitCategories = Number(req.query.limitCategories || 8);
+    const limitPerCategory = Number(req.query.limitPerCategory || 20);
+    const result = await fetchD4DCategoryPreview({ limitCategories, limitPerCategory });
+    res.json({ ok: true, ...result });
   } catch (error) {
     res.status(500).json({ error: "D4D_FETCH_FAILED", message: error.message });
   }
 });
 
-// Backward-compatible endpoint name. Now uses D4D.
+// Backward-compatible endpoint name.
+// It now uses D4D category mode, not LuLu.
 app.get("/api/agent/fetch-online", async (req, res) => {
-  if (!isAuthorized(req)) return res.status(401).json({ error: "UNAUTHORIZED" });
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
   try {
-    const query = String(req.query.query || "milk");
-    const limit = Number(req.query.limit || 20);
-    const rows = await fetchD4DPreview({ query, limit });
-    res.json({ ok: true, source: "D4D", query, count: rows.length, rows });
+    const limitCategories = Number(req.query.limitCategories || 8);
+    const limitPerCategory = Number(req.query.limitPerCategory || 20);
+    const result = await fetchD4DCategoryPreview({ limitCategories, limitPerCategory });
+    res.json({ ok: true, ...result });
   } catch (error) {
     res.status(500).json({ error: "ONLINE_FETCH_FAILED", message: error.message });
   }
 });
 
+// Run full category crawler and save rows.
 app.all("/api/agent/run", async (req, res) => {
-  if (!isAuthorized(req)) return res.status(401).json({ error: "UNAUTHORIZED" });
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
   try {
     const result = await runAgentOnce();
     res.json(result);
@@ -154,7 +243,11 @@ app.all("/api/agent/run", async (req, res) => {
 });
 
 app.post("/api/admin/price", async (req, res) => {
-  if (!isAuthorized(req)) return res.status(401).json({ error: "UNAUTHORIZED" });
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
   try {
     const supabase = makeSupabaseAdmin();
     const row = {
@@ -174,10 +267,18 @@ app.post("/api/admin/price", async (req, res) => {
       review_reason: req.body.review_reason || null,
       updated_at: new Date().toISOString()
     };
+
     if (!row.store || !row.item || !row.product || !row.size || !row.price) {
-      return res.status(400).json({ error: "MISSING_FIELDS", message: "store, item, product, size and price are required" });
+      res.status(400).json({ error: "MISSING_FIELDS", message: "store, item, product, size and price are required" });
+      return;
     }
-    const { data, error } = await supabase.from("prices").upsert(row, { onConflict: "store,item,brand,product,size" }).select().single();
+
+    const { data, error } = await supabase
+      .from("prices")
+      .upsert(row, { onConflict: "store,item,brand,product,size" })
+      .select()
+      .single();
+
     if (error) throw error;
     res.json({ ok: true, row: data });
   } catch (error) {
@@ -186,9 +287,14 @@ app.post("/api/admin/price", async (req, res) => {
 });
 
 app.post("/api/admin/store-rule", async (req, res) => {
-  if (!isAuthorized(req)) return res.status(401).json({ error: "UNAUTHORIZED" });
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
   try {
     const supabase = makeSupabaseAdmin();
+
     const row = {
       store: req.body.store,
       area: req.body.area,
@@ -198,8 +304,18 @@ app.post("/api/admin/store-rule", async (req, res) => {
       minimum_order: Number(req.body.minimum_order || 0),
       updated_at: new Date().toISOString()
     };
-    if (!row.store || !row.area) return res.status(400).json({ error: "MISSING_FIELDS", message: "store and area are required" });
-    const { data, error } = await supabase.from("store_rules").upsert(row, { onConflict: "store,area" }).select().single();
+
+    if (!row.store || !row.area) {
+      res.status(400).json({ error: "MISSING_FIELDS", message: "store and area are required" });
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("store_rules")
+      .upsert(row, { onConflict: "store,area" })
+      .select()
+      .single();
+
     if (error) throw error;
     res.json({ ok: true, row: data });
   } catch (error) {
@@ -209,11 +325,14 @@ app.post("/api/admin/store-rule", async (req, res) => {
 
 app.listen(port, () => {
   console.log(`SmartBasket Agent Manager running on http://localhost:${port}`);
+
   const minutes = Number(process.env.AGENT_INTERVAL_MINUTES || 0);
   if (minutes > 0) {
     console.log(`Agent scheduled every ${minutes} minutes while server is running.`);
     setInterval(() => {
-      runAgentOnce().then((result) => console.log("Scheduled agent run:", result)).catch((error) => console.error("Scheduled agent failed:", error.message));
+      runAgentOnce()
+        .then((result) => console.log("Scheduled agent run:", result))
+        .catch((error) => console.error("Scheduled agent failed:", error.message));
     }, minutes * 60 * 1000);
   }
 });
