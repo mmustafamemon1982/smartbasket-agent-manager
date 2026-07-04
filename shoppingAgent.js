@@ -1,7 +1,11 @@
 // shoppingAgent.js
 // Lightweight grocery request agent.
+// v4 parser fix:
+// - Understands "Need 30 eggs" as quantity 30 eggs, not quantity 1.
+// - Removes common request words: need, want, buy, get, add, please, etc.
+// - Keeps brand hints like Lusine/Lupine/Lupin => Lusine.
 // No paid AI API required for MVP.
-// Later this can be upgraded to OpenAI/LLM parsing and web search.
+// Later this can be upgraded to OpenAI/LLM parsing and item-specific web/API search.
 
 const ITEM_ALIASES = {
   egg: "eggs",
@@ -19,7 +23,9 @@ const ITEM_ALIASES = {
   chicken: "chicken",
   detergent: "detergent",
   tissue: "tissue",
+  tissues: "tissue",
   diapers: "diapers",
+  diaper: "diapers",
   cheese: "cheese",
   yogurt: "yogurt",
   yoghurt: "yogurt",
@@ -43,6 +49,8 @@ const NUMBER_WORDS = {
   eight: 8,
   nine: 9,
   ten: 10,
+  eleven: 11,
+  twelve: 12,
   dozen: 12,
   half: 0.5
 };
@@ -52,6 +60,34 @@ function cleanText(value) {
     .replace(/[،]/g, ",")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function stripRequestWords(value) {
+  let text = cleanText(value);
+
+  // Remove polite/request prefixes repeatedly.
+  // Examples:
+  // "Need 30 eggs" -> "30 eggs"
+  // "I want 2 milk" -> "2 milk"
+  // "Please add 3 croissants" -> "3 croissants"
+  let changed = true;
+  while (changed) {
+    const before = text;
+    text = text
+      .replace(/^(hi|hello|hey)\s+/i, "")
+      .replace(/^(please\s+)?(can you|could you|kindly)\s+/i, "")
+      .replace(/^(i\s+)?(need|want|wants|would like|am looking for|looking for)\s+/i, "")
+      .replace(/^(please\s+)?(add|buy|get|bring|order|find|search for|look for)\s+/i, "")
+      .replace(/^grocery\s*[:\-]?\s*/i, "")
+      .replace(/^groceries\s*[:\-]?\s*/i, "")
+      .replace(/^shopping\s*list\s*[:\-]?\s*/i, "")
+      .replace(/^list\s*[:\-]?\s*/i, "")
+      .replace(/^(of\s+)/i, "")
+      .trim();
+    changed = before !== text;
+  }
+
+  return text;
 }
 
 function singular(value) {
@@ -83,7 +119,7 @@ function inferUnit(productText) {
   return "pcs";
 }
 
-function normaliseQuantity(raw, productText) {
+function normaliseQuantity(raw) {
   if (!raw) return 1;
 
   const value = String(raw).toLowerCase().trim();
@@ -99,10 +135,14 @@ function normaliseQuantity(raw, productText) {
 
 function parseGroceryRequest(text) {
   const original = cleanText(text);
+
+  // Keep comma separation, but also split normal "and" lists.
+  // We strip words like "Need" per chunk after splitting.
   const normalised = original
     .replace(/\band\b/gi, ",")
     .replace(/\+/g, ",")
     .replace(/;/g, ",")
+    .replace(/\n/g, ",")
     .replace(/\s+/g, " ");
 
   const chunks = normalised
@@ -112,27 +152,44 @@ function parseGroceryRequest(text) {
 
   const items = [];
 
-  for (const chunk of chunks) {
+  for (const rawChunk of chunks) {
+    const chunk = stripRequestWords(rawChunk);
+
+    if (!chunk) continue;
+
     // Examples:
     // 30 eggs
     // 2 Lusine bread
     // 3 croissants
+    // two milk
+    // 1 dozen eggs
     // eggs 30 pcs
     // milk 2 ltr
-    let match = chunk.match(/^(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|dozen)\s+(.+)$/i);
+    let match = chunk.match(/^(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen)\s+(.+)$/i);
     let quantity = 1;
     let phrase = chunk;
 
     if (match) {
-      quantity = normaliseQuantity(match[1], match[2]);
-      phrase = cleanText(match[2]);
+      quantity = normaliseQuantity(match[1]);
+
+      // Special case: "1 dozen eggs" means 12 eggs, not 1.
+      const rest = cleanText(match[2]);
+      const dozenMatch = rest.match(/^dozen\s+(.+)$/i);
+      if (dozenMatch) {
+        quantity = Number(match[1]) * 12;
+        phrase = cleanText(dozenMatch[1]);
+      } else {
+        phrase = rest;
+      }
     } else {
       match = chunk.match(/^(.+?)\s+(\d+(?:\.\d+)?)\s*(pcs|pc|kg|g|l|ltr|ml|pack|packs)?$/i);
       if (match) {
         phrase = cleanText(match[1]);
-        quantity = normaliseQuantity(match[2], match[1]);
+        quantity = normaliseQuantity(match[2]);
       }
     }
+
+    phrase = stripRequestWords(phrase);
 
     const unit = inferUnit(phrase);
     const item = canonicalItem(phrase);
@@ -144,7 +201,7 @@ function parseGroceryRequest(text) {
     }
 
     items.push({
-      original: chunk,
+      original: rawChunk,
       item,
       phrase,
       brand,
@@ -169,7 +226,7 @@ function scoreRowForItem(row, item) {
   const phraseWords = String(item.phrase || "")
     .toLowerCase()
     .split(/\s+/)
-    .filter((w) => w.length > 2);
+    .filter((w) => w.length > 2 && !["need", "want", "please", "add", "buy", "get"].includes(w));
 
   let score = 0;
 
@@ -187,7 +244,7 @@ function scoreRowForItem(row, item) {
 
   if (item.item === "eggs") {
     if (haystack.includes("egg")) score += 25;
-    if (String(item.quantity) === "30" && haystack.includes("30")) score += 20;
+    if (Number(item.quantity) === 30 && haystack.includes("30")) score += 20;
   }
 
   if (item.item === "croissants") {
