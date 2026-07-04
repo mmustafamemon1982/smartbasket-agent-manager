@@ -22,7 +22,8 @@ const {
 } = require("./shoppingAgent");
 
 const {
-  fetchD4DRequestRows
+  fetchD4DRequestRows,
+  getLastD4DRequestDiagnostics
 } = require("./connectors/d4dRequestSearchConnector");
 
 const app = express();
@@ -298,7 +299,8 @@ app.all("/api/agent/d4d-request-search", async (req, res) => {
       ok: true,
       parsed_items: parsed.items,
       count: rows.length,
-      rows
+      rows,
+      diagnostics: getLastD4DRequestDiagnostics()
     });
   } catch (error) {
     res.status(500).json({ error: "D4D_REQUEST_SEARCH_FAILED", message: error.message });
