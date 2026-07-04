@@ -214,13 +214,21 @@ function brandFromItem(item, cardText) {
 }
 
 function firstImageFromHtml(segmentHtml, sourceUrl) {
-  const imgMatches = Array.from(String(segmentHtml || "").matchAll(/<img[^>]+>/gi));
+  const html = String(segmentHtml || "");
+
+  const imgMatches = Array.from(html.matchAll(/<img[^>]+>/gi));
   for (const m of imgMatches) {
     const tag = m[0];
-    const src =
+    let src =
       (tag.match(/\sdata-src=["']([^"']+)["']/i) || [])[1] ||
       (tag.match(/\sdata-original=["']([^"']+)["']/i) || [])[1] ||
+      (tag.match(/\sdata-lazy=["']([^"']+)["']/i) || [])[1] ||
       (tag.match(/\ssrc=["']([^"']+)["']/i) || [])[1];
+
+    if (!src) {
+      const srcset = (tag.match(/\ssrcset=["']([^"']+)["']/i) || [])[1];
+      if (srcset) src = srcset.split(",")[0].trim().split(" ")[0];
+    }
 
     if (!src) continue;
     if (src.startsWith("data:")) continue;
@@ -228,6 +236,13 @@ function firstImageFromHtml(segmentHtml, sourceUrl) {
     const url = absoluteUrl(src, sourceUrl);
     if (url) return url;
   }
+
+  const bg = (html.match(/background-image\s*:\s*url\(["']?([^"')]+)["']?\)/i) || [])[1];
+  if (bg && !bg.startsWith("data:")) {
+    const url = absoluteUrl(bg, sourceUrl);
+    if (url) return url;
+  }
+
   return null;
 }
 
@@ -238,7 +253,12 @@ function firstTitleFromHtml(segmentHtml) {
     const re = new RegExp(`${attr}=["']([^"']{4,120})["']`, "ig");
     for (const m of String(segmentHtml || "").matchAll(re)) {
       const text = cleanText(m[1]);
-      if (text && !/logo|view product|image|banner/i.test(text)) candidates.push(text);
+      if (
+        text &&
+        !/logo|view product|image|banner/i.test(text) &&
+        !/^generic available at/i.test(text) &&
+        !/available at .* in bahrain/i.test(text)
+      ) candidates.push(text);
     }
   }
 
@@ -246,25 +266,41 @@ function firstTitleFromHtml(segmentHtml) {
     const re = new RegExp(`<[^>]+class=["'][^"']*${cls}[^"']*["'][^>]*>([\\s\\S]{4,160}?)<\\/[^>]+>`, "ig");
     for (const m of String(segmentHtml || "").matchAll(re)) {
       const text = stripHtml(m[1]);
-      if (text && !/view product|sort by|price range/i.test(text)) candidates.push(text);
+      if (
+        text &&
+        !/view product|sort by|price range/i.test(text) &&
+        !/^generic available at/i.test(text) &&
+        !/available at .* in bahrain/i.test(text)
+      ) candidates.push(text);
     }
   }
 
   return candidates[0] || null;
 }
 
-function fallbackProductLabel(item, cardText) {
-  const requested = cleanText(item.phrase || item.item || "grocery item");
-
-  if (item.item === "eggs" && Number(item.quantity || 0) >= 12) {
-    return `${requested} offer`;
+function prettyItemName(item) {
+  if (item.item === "eggs" && Number(item.quantity || 0) >= 12) return `Eggs ${Number(item.quantity)} pcs`;
+  if (item.item === "croissants") return "Croissants";
+  if (item.item === "bread") {
+    if (item.brand && item.brand !== "Any") return `${item.brand} bread`;
+    return "Bread / buns";
   }
 
-  if (item.brand && item.brand !== "Any" && !requested.toLowerCase().includes(item.brand.toLowerCase())) {
-    return `${item.brand} ${requested} offer`;
+  const phrase = cleanText(item.phrase || item.item || "Grocery item");
+  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
+}
+
+function fallbackProductLabel(item, cardText, store) {
+  const name = prettyItemName(item);
+
+  if (item.brand && item.brand !== "Any") {
+    const card = String(cardText || "").toLowerCase();
+    if (!card.includes(item.brand.toLowerCase())) {
+      return `${name} alternative at ${store}`;
+    }
   }
 
-  return `${requested} offer`;
+  return `${name} option at ${store}`;
 }
 
 function segmentLikelyMatchesRequest(segmentText, item) {
@@ -273,8 +309,9 @@ function segmentLikelyMatchesRequest(segmentText, item) {
 
   if (item.item === "eggs") return lower.includes("egg") || true; // category page is already eggs
   if (item.item === "bread") {
-    if (item.brand && item.brand !== "Any") return lower.includes(item.brand.toLowerCase()) || lower.includes("bread") || lower.includes("bun");
-    return lower.includes("bread") || lower.includes("bun") || true;
+    // The Bread & Buns category often does not expose the words bread/bun inside each server-readable card.
+    // Treat cards from the bread category as alternatives, and label brand-specific requests as "not confirmed" unless the brand appears.
+    return true;
   }
   if (item.item === "croissants") return lower.includes("croissant") || lower.includes("pastry") || true;
 
@@ -328,7 +365,7 @@ function extractRowsFromHtml(html, item, sourceConfig, limit) {
     const title = firstTitleFromHtml(segmentHtml);
     const image_url = firstImageFromHtml(segmentHtml, sourceConfig.url);
     const originalPrice = visibleOriginalPrice(segmentText);
-    const product = title || fallbackProductLabel(item, segmentText);
+    const product = title || fallbackProductLabel(item, segmentText, store);
     const product_is_exact = !!title;
     const size = inferSizeFromRequest(item);
     const brand = brandFromItem(item, segmentText);
@@ -356,7 +393,7 @@ function extractRowsFromHtml(html, item, sourceConfig, limit) {
       needs_review: false,
       source_note: product_is_exact
         ? "Product title/image were extracted from the visible source card."
-        : "Exact product name was not exposed by the source page; this is an item-specific visible price card."
+        : "Exact product name was not exposed by the source page; this is an item-specific visible price card or alternative."
     });
   }
 
