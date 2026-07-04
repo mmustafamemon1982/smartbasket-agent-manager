@@ -210,7 +210,7 @@ async function runAgentOnce() {
   let rowsReview = 0;
 
   try {
-    const seedRows = process.env.SEED_FETCH_ENABLED === "false" ? [] : await fetchLocalSeedRows();
+    const seedRows = process.env.SEED_FETCH_ENABLED === "true" ? await fetchLocalSeedRows() : [];
     const d4dRows = await fetchD4DRows();
     const luluRows = await fetchLuLuRowsIfEnabled();
 
