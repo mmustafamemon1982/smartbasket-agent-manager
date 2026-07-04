@@ -71,7 +71,7 @@ app.get("/api/agent/status", async (req, res) => {
   }
 });
 
-app.post("/api/agent/run", async (req, res) => {
+app.all("/api/agent/run", async (req, res) => {
   const key = req.query.key || req.headers["x-agent-run-key"];
   if (!process.env.AGENT_RUN_KEY || key !== process.env.AGENT_RUN_KEY) {
     res.status(401).json({ error: "UNAUTHORIZED" });
