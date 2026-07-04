@@ -2,7 +2,7 @@
 // This connector represents the agent's first managed source.
 // Later, replace this with approved store APIs, partner feeds, CSV imports, or permitted web connectors.
 
-const seedRows = require("../seed-prices.json");
+const seedRows = require("./seed-prices.json");
 
 async function fetchSampleAgentFeed() {
   return seedRows.map((row) => ({
