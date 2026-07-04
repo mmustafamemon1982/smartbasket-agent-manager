@@ -1,7 +1,8 @@
 // server.js
 // SmartBasket Agent Manager backend.
-// Active source: D4D Bahrain category crawler.
-// Customer app reads /api/products, /api/prices, and /api/store-rules.
+// v3: AI-style grocery request agent.
+// Customer can type: "Need 30 eggs, 2 Lusine bread and 3 croissants"
+// Agent parses request, matches available prices, and optimises by store rules.
 
 require("dotenv").config();
 
@@ -13,13 +14,18 @@ const {
   fetchD4DCategoryPreview,
   listD4DCategoriesPreview
 } = require("./agent");
-const { validateD4DRowIsActive } = require("./connectors/d4dCategoryConnector");
+
+const {
+  parseGroceryRequest,
+  matchGroceryItems,
+  optimiseMatchedBasket
+} = require("./shoppingAgent");
 
 const app = express();
 const port = process.env.PORT || 8787;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 function adminKey(req) {
   return req.query.key || req.headers["x-agent-run-key"];
@@ -27,43 +33,6 @@ function adminKey(req) {
 
 function isAuthorized(req) {
   return process.env.AGENT_RUN_KEY && adminKey(req) === process.env.AGENT_RUN_KEY;
-}
-
-function categoryForItem(item) {
-  const value = String(item || "").toLowerCase();
-
-  if (["milk", "yogurt", "cheese", "butter", "cream", "laban", "labneh", "dairy", "eggs"].includes(value)) return "Dairy & Eggs";
-  if (["rice", "pasta", "flour", "sugar", "oil", "olive oil", "salt", "grocery", "food"].includes(value)) return "Food - Grocery";
-  if (["chicken", "beef", "mutton", "fish", "meat", "poultry"].includes(value)) return "Chicken, Meat & Fish";
-  if (["bananas", "banana", "apple", "apples", "tomato", "potato", "onion", "vegetable", "fruit"].includes(value)) return "Fruits & Vegetable";
-  if (["detergent", "dishwash", "tissue", "cleaner", "laundry", "cleaning"].includes(value)) return "Laundry & Cleaning";
-  if (["water", "juice", "soft drink", "cola", "drinks", "beverages"].includes(value)) return "Drinks & Beverages";
-  if (["bread", "bakery", "biscuits", "snacks", "chocolate"].includes(value)) return "Bakery & Snacks";
-  if (["diapers", "baby wipes", "formula", "baby"].includes(value)) return "Baby & Mom Care";
-
-  return "Grocery";
-}
-
-
-
-function isAllowedCustomerPriceSource(row) {
-  // Default: customer app should only see live/category-fetched rows.
-  // This hides old seed/admin/test rows such as the initial Talabat eggs sample.
-  const mode = String(process.env.PRICE_SOURCE_MODE || "category_only").toLowerCase();
-  if (mode === "all") return true;
-
-  const source = String(row.source || "").toLowerCase();
-
-  if (source.includes("fallback")) return false;
-  if (mode === "category_only") {
-    return source.includes("d4d") && source.includes("category");
-  }
-
-  if (mode === "online_only") {
-    return source.includes("d4d") || source.includes("online");
-  }
-
-  return source.includes("d4d") && source.includes("category");
 }
 
 function isNoisyCatalogRow(row) {
@@ -100,6 +69,41 @@ function isNoisyCatalogRow(row) {
   return false;
 }
 
+function isAllowedCustomerPriceSource(row) {
+  // Default: customer app should only see live/category-fetched rows.
+  // Set PRICE_SOURCE_MODE=all only for testing.
+  const mode = String(process.env.PRICE_SOURCE_MODE || "category_only").toLowerCase();
+  if (mode === "all") return true;
+
+  const source = String(row.source || "").toLowerCase();
+
+  if (source.includes("fallback")) return false;
+  if (mode === "category_only") {
+    return source.includes("d4d") && source.includes("category");
+  }
+
+  if (mode === "online_only") {
+    return source.includes("d4d") || source.includes("online");
+  }
+
+  return source.includes("d4d") && source.includes("category");
+}
+
+function categoryForItem(item) {
+  const value = String(item || "").toLowerCase();
+
+  if (["milk", "yogurt", "cheese", "butter", "cream", "laban", "labneh", "dairy", "eggs"].includes(value)) return "Dairy & Eggs";
+  if (["rice", "pasta", "flour", "sugar", "oil", "olive oil", "salt", "grocery", "food"].includes(value)) return "Food - Grocery";
+  if (["chicken", "beef", "mutton", "fish", "meat", "poultry"].includes(value)) return "Chicken, Meat & Fish";
+  if (["bananas", "banana", "apple", "apples", "tomato", "potato", "onion", "vegetable", "fruit"].includes(value)) return "Fruits & Vegetable";
+  if (["detergent", "dishwash", "tissue", "cleaner", "laundry", "cleaning"].includes(value)) return "Laundry & Cleaning";
+  if (["water", "juice", "soft drink", "cola", "drinks", "beverages"].includes(value)) return "Drinks & Beverages";
+  if (["bread", "bakery", "biscuits", "snacks", "chocolate", "croissant", "croissants"].includes(value)) return "Bakery & Snacks";
+  if (["diapers", "baby wipes", "formula", "baby"].includes(value)) return "Baby & Mom Care";
+
+  return "Grocery";
+}
+
 function normalizeProductId(row) {
   return [row.item, row.brand, row.product, row.size]
     .join("-")
@@ -108,30 +112,52 @@ function normalizeProductId(row) {
     .replace(/(^-|-$)/g, "");
 }
 
+async function getCustomerVisiblePrices() {
+  const supabase = makeSupabaseAdmin();
+
+  const { data, error } = await supabase
+    .from("prices")
+    .select("store,item,brand,product,size,price,match,confidence,source,source_url,last_checked,is_active,needs_review")
+    .eq("is_active", true)
+    .eq("needs_review", false)
+    .order("store", { ascending: true });
+
+  if (error) throw error;
+
+  return (data || [])
+    .filter((row) => !isNoisyCatalogRow(row))
+    .filter((row) => isAllowedCustomerPriceSource(row));
+}
+
+async function getStoreRules(area) {
+  const supabase = makeSupabaseAdmin();
+
+  let query = supabase
+    .from("store_rules")
+    .select("store,area,is_available,delivery_fee,free_delivery_above,minimum_order,updated_at")
+    .order("area", { ascending: true })
+    .order("store", { ascending: true });
+
+  if (area) query = query.eq("area", String(area));
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  return data || [];
+}
+
 app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
     service: "smartbasket-agent-manager",
-    active_source: "d4d_category_crawler",
+    mode: "ai_grocery_request_agent",
     time: new Date().toISOString()
   });
 });
 
 app.get("/api/prices", async (req, res) => {
   try {
-    const supabase = makeSupabaseAdmin();
-    const { data, error } = await supabase
-      .from("prices")
-      .select("store,item,brand,product,size,price,match,confidence,source,source_url,last_checked,is_active,needs_review")
-      .eq("is_active", true)
-      .eq("needs_review", false)
-      .order("store", { ascending: true });
-
-    if (error) throw error;
-
-    const rows = (data || [])
-      .filter((row) => !isNoisyCatalogRow(row))
-      .filter((row) => isAllowedCustomerPriceSource(row));
+    const rows = await getCustomerVisiblePrices();
     res.json({ count: rows.length, rows });
   } catch (error) {
     res.status(500).json({ error: "PRICE_FETCH_FAILED", message: error.message, rows: [] });
@@ -140,24 +166,10 @@ app.get("/api/prices", async (req, res) => {
 
 app.get("/api/products", async (req, res) => {
   try {
-    const supabase = makeSupabaseAdmin();
-
-    const { data, error } = await supabase
-      .from("prices")
-      .select("item,brand,product,size,is_active,needs_review")
-      .eq("is_active", true)
-      .eq("needs_review", false)
-      .order("item", { ascending: true })
-      .order("brand", { ascending: true })
-      .order("product", { ascending: true });
-
-    if (error) throw error;
-
+    const rows = await getCustomerVisiblePrices();
     const map = new Map();
 
-    for (const row of data || []) {
-      if (isNoisyCatalogRow(row)) continue;
-      if (!isAllowedCustomerPriceSource(row)) continue;
+    for (const row of rows || []) {
       const id = normalizeProductId(row);
       if (!map.has(id)) {
         map.set(id, {
@@ -171,13 +183,13 @@ app.get("/api/products", async (req, res) => {
       }
     }
 
-    const rows = Array.from(map.values()).sort((a, b) => {
+    const products = Array.from(map.values()).sort((a, b) => {
       const ca = `${a.category} ${a.item} ${a.brand} ${a.product} ${a.size}`;
       const cb = `${b.category} ${b.item} ${b.brand} ${b.product} ${b.size}`;
       return ca.localeCompare(cb);
     });
 
-    res.json({ count: rows.length, rows });
+    res.json({ count: products.length, rows: products });
   } catch (error) {
     res.status(500).json({ error: "PRODUCT_FETCH_FAILED", message: error.message, rows: [] });
   }
@@ -185,24 +197,56 @@ app.get("/api/products", async (req, res) => {
 
 app.get("/api/store-rules", async (req, res) => {
   try {
-    const supabase = makeSupabaseAdmin();
-
-    let query = supabase
-      .from("store_rules")
-      .select("store,area,is_available,delivery_fee,free_delivery_above,minimum_order,updated_at")
-      .order("area", { ascending: true })
-      .order("store", { ascending: true });
-
-    if (req.query.area) {
-      query = query.eq("area", String(req.query.area));
-    }
-
-    const { data, error } = await query;
-    if (error) throw error;
-
-    res.json({ count: data.length, rows: data });
+    const rows = await getStoreRules(req.query.area);
+    res.json({ count: rows.length, rows });
   } catch (error) {
     res.status(500).json({ error: "STORE_RULE_FETCH_FAILED", message: error.message, rows: [] });
+  }
+});
+
+// AI-style grocery request endpoint.
+// Supports GET for browser testing and POST for customer app.
+app.all("/api/agent/grocery-request", async (req, res) => {
+  try {
+    const text = String(req.body?.text || req.query.text || req.query.q || "").trim();
+    const area = String(req.body?.area || req.query.area || "Saar");
+    const delivery = String(req.body?.delivery ?? req.query.delivery ?? "true") !== "false";
+    const maxStores = Number(req.body?.maxStores || req.query.maxStores || 2);
+
+    if (!text) {
+      res.status(400).json({
+        error: "MISSING_TEXT",
+        message: "Please provide grocery request text, for example: Need 30 eggs, 2 Lusine bread and 3 croissants."
+      });
+      return;
+    }
+
+    const parsed = parseGroceryRequest(text);
+    const prices = await getCustomerVisiblePrices();
+    const storeRules = await getStoreRules(area);
+
+    const matched = matchGroceryItems(parsed.items, prices);
+    const recommendation = optimiseMatchedBasket({
+      matchedItems: matched,
+      storeRules,
+      area,
+      delivery,
+      maxStores
+    });
+
+    res.json({
+      ok: true,
+      area,
+      delivery,
+      request_text: text,
+      parsed_items: parsed.items,
+      unmatched_items: matched.filter((item) => !item.matches.length),
+      matched_items: matched,
+      recommendation,
+      note: "Prices and availability can change. Verify final checkout price before buying."
+    });
+  } catch (error) {
+    res.status(500).json({ error: "GROCERY_AGENT_FAILED", message: error.message });
   }
 });
 
@@ -222,7 +266,6 @@ app.get("/api/agent/status", async (req, res) => {
   }
 });
 
-// Shows categories discovered by the D4D connector.
 app.get("/api/agent/d4d-categories", async (req, res) => {
   if (!isAuthorized(req)) {
     res.status(401).json({ error: "UNAUTHORIZED" });
@@ -237,7 +280,6 @@ app.get("/api/agent/d4d-categories", async (req, res) => {
   }
 });
 
-// Tests category crawling without saving rows.
 app.get("/api/agent/fetch-d4d-categories", async (req, res) => {
   if (!isAuthorized(req)) {
     res.status(401).json({ error: "UNAUTHORIZED" });
@@ -254,43 +296,6 @@ app.get("/api/agent/fetch-d4d-categories", async (req, res) => {
   }
 });
 
-// Backward-compatible preview endpoint.
-// It now uses category mode by default.
-app.get("/api/agent/fetch-d4d", async (req, res) => {
-  if (!isAuthorized(req)) {
-    res.status(401).json({ error: "UNAUTHORIZED" });
-    return;
-  }
-
-  try {
-    const limitCategories = Number(req.query.limitCategories || 8);
-    const limitPerCategory = Number(req.query.limitPerCategory || 20);
-    const result = await fetchD4DCategoryPreview({ limitCategories, limitPerCategory });
-    res.json({ ok: true, ...result });
-  } catch (error) {
-    res.status(500).json({ error: "D4D_FETCH_FAILED", message: error.message });
-  }
-});
-
-// Backward-compatible endpoint name.
-// It now uses D4D category mode, not LuLu.
-app.get("/api/agent/fetch-online", async (req, res) => {
-  if (!isAuthorized(req)) {
-    res.status(401).json({ error: "UNAUTHORIZED" });
-    return;
-  }
-
-  try {
-    const limitCategories = Number(req.query.limitCategories || 8);
-    const limitPerCategory = Number(req.query.limitPerCategory || 20);
-    const result = await fetchD4DCategoryPreview({ limitCategories, limitPerCategory });
-    res.json({ ok: true, ...result });
-  } catch (error) {
-    res.status(500).json({ error: "ONLINE_FETCH_FAILED", message: error.message });
-  }
-});
-
-// Run full category crawler and save rows.
 app.all("/api/agent/run", async (req, res) => {
   if (!isAuthorized(req)) {
     res.status(401).json({ error: "UNAUTHORIZED" });
@@ -386,130 +391,6 @@ app.post("/api/admin/store-rule", async (req, res) => {
   }
 });
 
-
-// Deactivates noisy rows already saved from earlier fallback extraction.
-app.all("/api/admin/cleanup-noisy-prices", async (req, res) => {
-  if (!isAuthorized(req)) {
-    res.status(401).json({ error: "UNAUTHORIZED" });
-    return;
-  }
-
-  try {
-    const supabase = makeSupabaseAdmin();
-
-    const { data, error } = await supabase
-      .from("prices")
-      .select("store,item,brand,product,size,source");
-
-    if (error) throw error;
-
-    const noisyRows = (data || []).filter((row) => isNoisyCatalogRow(row));
-    let deactivated = 0;
-
-    for (const row of noisyRows) {
-      const { error: updateError } = await supabase
-        .from("prices")
-        .update({
-          is_active: false,
-          needs_review: true,
-          review_reason: "Removed noisy category/fallback extraction",
-          updated_at: new Date().toISOString()
-        })
-        .eq("store", row.store)
-        .eq("item", row.item)
-        .eq("brand", row.brand)
-        .eq("product", row.product)
-        .eq("size", row.size);
-
-      if (!updateError) deactivated += 1;
-    }
-
-    res.json({
-      ok: true,
-      scanned: (data || []).length,
-      noisy_found: noisyRows.length,
-      deactivated
-    });
-  } catch (error) {
-    res.status(500).json({ error: "CLEANUP_FAILED", message: error.message });
-  }
-});
-
-
-// Deactivates rows whose source pages are expired or unavailable.
-app.all("/api/admin/cleanup-expired-prices", async (req, res) => {
-  if (!isAuthorized(req)) {
-    res.status(401).json({ error: "UNAUTHORIZED" });
-    return;
-  }
-
-  try {
-    const supabase = makeSupabaseAdmin();
-
-    const { data, error } = await supabase
-      .from("prices")
-      .select("store,item,brand,product,size,source,source_url,is_active")
-      .eq("is_active", true);
-
-    if (error) throw error;
-
-    const rows = data || [];
-    let checked = 0;
-    let expired = 0;
-    let deactivated = 0;
-    const examples = [];
-
-    for (const row of rows) {
-      if (!String(row.source || "").toLowerCase().includes("d4d")) continue;
-
-      checked += 1;
-      const validation = await validateD4DRowIsActive(row);
-
-      if (!validation.active) {
-        expired += 1;
-
-        const { error: updateError } = await supabase
-          .from("prices")
-          .update({
-            is_active: false,
-            needs_review: true,
-            review_reason: validation.reason || "Expired/unavailable source page",
-            updated_at: new Date().toISOString()
-          })
-          .eq("store", row.store)
-          .eq("item", row.item)
-          .eq("brand", row.brand)
-          .eq("product", row.product)
-          .eq("size", row.size);
-
-        if (!updateError) {
-          deactivated += 1;
-          if (examples.length < 10) {
-            examples.push({
-              store: row.store,
-              product: row.product,
-              reason: validation.reason
-            });
-          }
-        }
-      }
-    }
-
-    res.json({
-      ok: true,
-      scanned: rows.length,
-      d4d_checked: checked,
-      expired_found: expired,
-      deactivated,
-      examples
-    });
-  } catch (error) {
-    res.status(500).json({ error: "EXPIRED_CLEANUP_FAILED", message: error.message });
-  }
-});
-
-
-// Deactivates old seed/admin/test rows so only category-fetched price rows remain customer-visible.
 app.all("/api/admin/cleanup-legacy-prices", async (req, res) => {
   if (!isAuthorized(req)) {
     res.status(401).json({ error: "UNAUTHORIZED" });
