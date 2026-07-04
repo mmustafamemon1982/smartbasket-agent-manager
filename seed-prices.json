@@ -1,0 +1,123 @@
+[
+  {
+    "store": "LuLu",
+    "item": "milk",
+    "brand": "Almarai",
+    "product": "Almarai Fresh Milk",
+    "size": "1L",
+    "price": 0.58,
+    "match": 96,
+    "confidence": "High",
+    "source": "admin_seed"
+  },
+  {
+    "store": "Carrefour",
+    "item": "milk",
+    "brand": "Almarai",
+    "product": "Almarai Fresh Milk",
+    "size": "1L",
+    "price": 0.67,
+    "match": 96,
+    "confidence": "High",
+    "source": "admin_seed"
+  },
+  {
+    "store": "Al Jazira",
+    "item": "milk",
+    "brand": "Almarai",
+    "product": "Almarai Fresh Milk",
+    "size": "1L",
+    "price": 0.62,
+    "match": 95,
+    "confidence": "High",
+    "source": "admin_seed"
+  },
+  {
+    "store": "LuLu",
+    "item": "eggs",
+    "brand": "Generic",
+    "product": "Large Eggs",
+    "size": "30 pcs",
+    "price": 2.25,
+    "match": 92,
+    "confidence": "High",
+    "source": "admin_seed"
+  },
+  {
+    "store": "Carrefour",
+    "item": "eggs",
+    "brand": "Generic",
+    "product": "Large Eggs",
+    "size": "30 pcs",
+    "price": 1.95,
+    "match": 92,
+    "confidence": "High",
+    "source": "admin_seed"
+  },
+  {
+    "store": "LuLu",
+    "item": "rice",
+    "brand": "Generic",
+    "product": "Basmati Rice",
+    "size": "5kg",
+    "price": 3.85,
+    "match": 90,
+    "confidence": "High",
+    "source": "admin_seed"
+  },
+  {
+    "store": "Al Jazira",
+    "item": "chicken",
+    "brand": "Generic",
+    "product": "Fresh Chicken Breast",
+    "size": "1kg",
+    "price": 2.1,
+    "match": 93,
+    "confidence": "High",
+    "source": "admin_seed"
+  },
+  {
+    "store": "LuLu",
+    "item": "detergent",
+    "brand": "Ariel",
+    "product": "Ariel Powder Detergent",
+    "size": "3kg",
+    "price": 3.75,
+    "match": 94,
+    "confidence": "High",
+    "source": "admin_seed"
+  },
+  {
+    "store": "Carrefour",
+    "item": "coffee",
+    "brand": "Generic",
+    "product": "Instant Coffee",
+    "size": "200g",
+    "price": 1.75,
+    "match": 92,
+    "confidence": "High",
+    "source": "admin_seed"
+  },
+  {
+    "store": "Al Jazira",
+    "item": "cereal",
+    "brand": "Generic",
+    "product": "Breakfast Cereal",
+    "size": "500g",
+    "price": 1.15,
+    "match": 92,
+    "confidence": "High",
+    "source": "admin_seed"
+  },
+  {
+    "store": "LuLu",
+    "item": "olive oil",
+    "brand": "Generic",
+    "product": "Extra Virgin Olive Oil",
+    "size": "1L",
+    "price": 2.25,
+    "match": 92,
+    "confidence": "High",
+    "source": "admin_seed"
+  }
+]
