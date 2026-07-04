@@ -1,9 +1,10 @@
 // connectors/d4dRequestSearchConnector.js
-// SmartBasket v8 request-specific online price search.
-// - Fixes D4D TLS issue with optional D4D_IGNORE_TLS_ERRORS=true.
-// - Extracts item-specific product cards.
-// - Tries to capture product image URL and card title/alt text when visible.
-// - Does not invent exact SKU names; if not exposed, labels it as an item offer.
+// SmartBasket v10 request-specific online price search.
+// Fixes:
+// - Never shows bad generated names like "available at HyperMax in Bahrain".
+// - Shows clean item-option labels.
+// - Treats brand-specific bread as "alternative" unless source confirms the brand.
+// - Tries multiple image formats, but keeps "No image" if source does not expose product image to Render.
 
 const https = require("https");
 const http = require("http");
@@ -125,8 +126,6 @@ function requestText(url, redirectsLeft = 3) {
       timeout: 15000
     };
 
-    // D4D has shown an expired TLS certificate to Render/Node.
-    // This is only for the public D4D price fetcher and controlled by env.
     if (url.startsWith("https:") && process.env.D4D_IGNORE_TLS_ERRORS !== "false") {
       requestOptions.rejectUnauthorized = false;
     }
@@ -145,18 +144,11 @@ function requestText(url, redirectsLeft = 3) {
       res.setEncoding("utf8");
       res.on("data", (chunk) => { data += chunk; });
       res.on("end", () => {
-        resolve({
-          status,
-          finalUrl: url,
-          html: data
-        });
+        resolve({ status, finalUrl: url, html: data });
       });
     });
 
-    req.on("timeout", () => {
-      req.destroy(new Error("Request timed out"));
-    });
-
+    req.on("timeout", () => req.destroy(new Error("Request timed out")));
     req.on("error", reject);
   });
 }
@@ -172,9 +164,7 @@ function pageLooksExpiredOrUnavailable(html) {
 }
 
 function pricesFromText(text) {
-  return Array.from(
-    String(text || "").matchAll(/\b(?:BHD|BD)\s*([0-9]+(?:\.[0-9]{1,3})?)/gi)
-  )
+  return Array.from(String(text || "").matchAll(/\b(?:BHD|BD)\s*([0-9]+(?:\.[0-9]{1,3})?)/gi))
     .map((m) => Number(m[1]))
     .filter((n) => Number.isFinite(n) && n > 0);
 }
@@ -192,25 +182,9 @@ function visibleOriginalPrice(segmentText) {
 }
 
 function inferSizeFromRequest(item) {
-  if (item.item === "eggs" && Number(item.quantity || 0) >= 12) {
-    return `${Number(item.quantity)} pcs requested`;
-  }
-
-  if (item.unit && item.unit !== "pcs") {
-    return `${item.quantity || 1} ${item.unit}`;
-  }
-
+  if (item.item === "eggs" && Number(item.quantity || 0) >= 12) return `${Number(item.quantity)} pcs requested`;
+  if (item.unit && item.unit !== "pcs") return `${item.quantity || 1} ${item.unit}`;
   return "price card";
-}
-
-function brandFromItem(item, cardText) {
-  if (item.brand && item.brand !== "Any") return item.brand;
-
-  const phrase = String(item.phrase || "").toLowerCase();
-  const card = String(cardText || "").toLowerCase();
-  if (phrase.includes("lusine") || phrase.includes("lupine") || phrase.includes("lupin") || card.includes("lusine")) return "Lusine";
-
-  return "Generic";
 }
 
 function firstImageFromHtml(segmentHtml, sourceUrl) {
@@ -230,59 +204,81 @@ function firstImageFromHtml(segmentHtml, sourceUrl) {
       if (srcset) src = srcset.split(",")[0].trim().split(" ")[0];
     }
 
-    if (!src) continue;
-    if (src.startsWith("data:")) continue;
+    if (!src || src.startsWith("data:")) continue;
 
     const url = absoluteUrl(src, sourceUrl);
     if (url) return url;
   }
 
   const bg = (html.match(/background-image\s*:\s*url\(["']?([^"')]+)["']?\)/i) || [])[1];
-  if (bg && !bg.startsWith("data:")) {
-    const url = absoluteUrl(bg, sourceUrl);
-    if (url) return url;
-  }
+  if (bg && !bg.startsWith("data:")) return absoluteUrl(bg, sourceUrl);
 
   return null;
 }
 
-function firstTitleFromHtml(segmentHtml) {
+function badGeneratedName(text, store) {
+  const t = cleanText(text).toLowerCase();
+  if (!t) return true;
+
+  const s = String(store || "").toLowerCase();
+
+  if (t === "title") return true;
+  if (t === "maximize_icon") return true;
+  if (t === "minimize_icon") return true;
+  if (t === "close_icon") return true;
+  if (t.includes("maximize_icon")) return true;
+  if (t.includes("minimize_icon")) return true;
+  if (t.includes("close_icon")) return true;
+  if (t.includes("_icon")) return true;
+  if (/^[a-z0-9_-]*icon[a-z0-9_-]*$/i.test(t)) return true;
+  if (/\.(svg|png|jpg|jpeg|webp)$/i.test(t)) return true;
+  if (t.includes("view product")) return true;
+  if (t.includes("sort by")) return true;
+  if (t.includes("price range")) return true;
+  if (t.includes("official flyer prices")) return true;
+  if (t.includes("prices are ai-generated")) return true;
+  if (t.includes("available at") && t.includes("bahrain")) return true;
+  if (s && (t === s || t.includes(`available at ${s}`))) return true;
+
+  return false;
+}
+
+function candidateTitleFromHtml(segmentHtml, item, store) {
   const candidates = [];
+  const html = String(segmentHtml || "");
 
   for (const attr of ["alt", "title", "aria-label"]) {
-    const re = new RegExp(`${attr}=["']([^"']{4,120})["']`, "ig");
-    for (const m of String(segmentHtml || "").matchAll(re)) {
+    const re = new RegExp(`${attr}=["']([^"']{4,140})["']`, "ig");
+    for (const m of html.matchAll(re)) {
       const text = cleanText(m[1]);
-      if (
-        text &&
-        !/logo|view product|image|banner/i.test(text) &&
-        !/^generic available at/i.test(text) &&
-        !/available at .* in bahrain/i.test(text)
-      ) candidates.push(text);
+      if (!badGeneratedName(text, store)) candidates.push(text);
     }
   }
 
   for (const cls of ["product-name", "product-title", "name", "title"]) {
-    const re = new RegExp(`<[^>]+class=["'][^"']*${cls}[^"']*["'][^>]*>([\\s\\S]{4,160}?)<\\/[^>]+>`, "ig");
-    for (const m of String(segmentHtml || "").matchAll(re)) {
+    const re = new RegExp(`<[^>]+class=["'][^"']*${cls}[^"']*["'][^>]*>([\\s\\S]{4,180}?)<\\/[^>]+>`, "ig");
+    for (const m of html.matchAll(re)) {
       const text = stripHtml(m[1]);
-      if (
-        text &&
-        !/view product|sort by|price range/i.test(text) &&
-        !/^generic available at/i.test(text) &&
-        !/available at .* in bahrain/i.test(text)
-      ) candidates.push(text);
+      if (!badGeneratedName(text, store)) candidates.push(text);
     }
   }
 
-  return candidates[0] || null;
+  const itemWords = String(item.phrase || item.item || "").toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+  const useful = candidates.find((text) => {
+    const lower = text.toLowerCase();
+    if (badGeneratedName(lower, store)) return false;
+    if (item.brand && item.brand !== "Any" && lower.includes(item.brand.toLowerCase())) return true;
+    return itemWords.some((w) => lower.includes(w)) || lower.includes(String(item.item || "").replace(/s$/, ""));
+  });
+
+  return useful || null;
 }
 
-function prettyItemName(item) {
+function prettyItemName(item, confirmedBrand) {
   if (item.item === "eggs" && Number(item.quantity || 0) >= 12) return `Eggs ${Number(item.quantity)} pcs`;
   if (item.item === "croissants") return "Croissants";
   if (item.item === "bread") {
-    if (item.brand && item.brand !== "Any") return `${item.brand} bread`;
+    if (confirmedBrand) return `${item.brand} bread`;
     return "Bread / buns";
   }
 
@@ -290,32 +286,36 @@ function prettyItemName(item) {
   return phrase.charAt(0).toUpperCase() + phrase.slice(1);
 }
 
-function fallbackProductLabel(item, cardText, store) {
-  const name = prettyItemName(item);
+function brandInfo(item, cardText) {
+  const requestedBrand = item.brand && item.brand !== "Any" ? item.brand : null;
+  const lower = String(cardText || "").toLowerCase();
 
-  if (item.brand && item.brand !== "Any") {
-    const card = String(cardText || "").toLowerCase();
-    if (!card.includes(item.brand.toLowerCase())) {
-      return `${name} alternative at ${store}`;
-    }
+  if (requestedBrand && lower.includes(requestedBrand.toLowerCase())) {
+    return { brand: requestedBrand, exactBrand: true };
+  }
+
+  if (requestedBrand) {
+    return { brand: "Alternative", exactBrand: false };
+  }
+
+  return { brand: "Generic", exactBrand: true };
+}
+
+function fallbackProductLabel(item, cardText, store) {
+  const info = brandInfo(item, cardText);
+  const name = prettyItemName(item, info.exactBrand);
+
+  if (item.brand && item.brand !== "Any" && !info.exactBrand) {
+    return `${name} alternative at ${store}`;
   }
 
   return `${name} option at ${store}`;
 }
 
 function segmentLikelyMatchesRequest(segmentText, item) {
-  const lower = String(segmentText || "").toLowerCase();
-  const phrase = String(item.phrase || item.item || "").toLowerCase();
-
-  if (item.item === "eggs") return lower.includes("egg") || true; // category page is already eggs
-  if (item.item === "bread") {
-    // The Bread & Buns category often does not expose the words bread/bun inside each server-readable card.
-    // Treat cards from the bread category as alternatives, and label brand-specific requests as "not confirmed" unless the brand appears.
-    return true;
-  }
-  if (item.item === "croissants") return lower.includes("croissant") || lower.includes("pastry") || true;
-
-  return lower.includes(item.item) || lower.includes(phrase.split(" ")[0]) || true;
+  // Because pages are already item/category-specific, keep this broad.
+  // Product names are often not exposed in server-readable text.
+  return true;
 }
 
 function cardHtmlSegments(html) {
@@ -323,7 +323,6 @@ function cardHtmlSegments(html) {
   const out = [];
 
   for (let i = 1; i < parts.length; i += 1) {
-    // Include a small part before "View Product" because images/titles can appear before text.
     const before = parts[i - 1].slice(-1200);
     const after = parts[i].slice(0, 1800);
     out.push(before + " View Product " + after);
@@ -350,9 +349,7 @@ function extractRowsFromHtml(html, item, sourceConfig, limit) {
       lower.includes("view more products") ||
       lower.includes("privacy policy") ||
       lower.includes("terms of service")
-    ) {
-      continue;
-    }
+    ) continue;
 
     if (!segmentLikelyMatchesRequest(segmentText, item)) continue;
 
@@ -362,29 +359,31 @@ function extractRowsFromHtml(html, item, sourceConfig, limit) {
     const store = normalizeStoreName(segmentText);
     if (!store) continue;
 
-    const title = firstTitleFromHtml(segmentHtml);
-    const image_url = firstImageFromHtml(segmentHtml, sourceConfig.url);
     const originalPrice = visibleOriginalPrice(segmentText);
+    const title = candidateTitleFromHtml(segmentHtml, item, store);
+    const image_url = firstImageFromHtml(segmentHtml, sourceConfig.url);
+    const brandData = brandInfo(item, segmentText);
+
     const product = title || fallbackProductLabel(item, segmentText, store);
     const product_is_exact = !!title;
     const size = inferSizeFromRequest(item);
-    const brand = brandFromItem(item, segmentText);
 
-    const key = `${store}|${item.item}|${brand}|${product}|${size}|${price}`;
+    const key = `${store}|${item.item}|${brandData.brand}|${product}|${size}|${price}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
     rows.push({
       store,
       item: item.item,
-      brand,
+      brand: brandData.brand,
       product,
       product_is_exact,
+      exact_brand: brandData.exactBrand,
       size,
       price,
       original_price: originalPrice,
       image_url,
-      match: item.brand && item.brand !== "Any" ? 70 : 78,
+      match: product_is_exact ? 82 : 72,
       confidence: product_is_exact ? "Medium" : "Low",
       source: "requested_item_online_price_card",
       source_url: sourceConfig.url,
@@ -393,7 +392,7 @@ function extractRowsFromHtml(html, item, sourceConfig, limit) {
       needs_review: false,
       source_note: product_is_exact
         ? "Product title/image were extracted from the visible source card."
-        : "Exact product name was not exposed by the source page; this is an item-specific visible price card or alternative."
+        : "Exact product name was not exposed by the source page; this is an item-specific price option."
     });
   }
 
