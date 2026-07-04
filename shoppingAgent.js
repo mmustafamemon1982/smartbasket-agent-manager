@@ -357,7 +357,8 @@ function optimiseMatchedBasket({ matchedItems, storeRules, area = "Saar", maxSto
         score: chosen.score,
         image_url: chosen.image_url || null,
         source_url: chosen.source_url || null,
-        source_note: chosen.source_note || null
+        source_note: chosen.source_note || null,
+        is_exact_brand: item.brand === "Any" || String(chosen.brand || "").toLowerCase() === String(item.brand || "").toLowerCase() || String(chosen.product || "").toLowerCase().includes(String(item.brand || "").toLowerCase())
       });
     }
 
@@ -391,12 +392,24 @@ function optimiseMatchedBasket({ matchedItems, storeRules, area = "Saar", maxSto
 
   options.sort((a, b) => a.total - b.total);
 
+  const isComplete = unmatched.length === 0;
+
   return {
-    status: options.length ? "ok" : "partial",
+    status: options.length ? (isComplete ? "ok" : "partial") : "partial",
+    is_complete: isComplete,
+    message: isComplete
+      ? "I found a complete basket option."
+      : `I found a partial basket, but ${unmatched.length} item(s) still need better matches.`,
     best: options[0] || null,
     options: options.slice(0, 5),
     unmatched_count: unmatched.length,
-    unmatched
+    unmatched,
+    missing_items: unmatched.map((item) => ({
+      request: item.original,
+      item: item.item,
+      brand: item.brand,
+      quantity: item.quantity
+    }))
   };
 }
 

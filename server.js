@@ -265,7 +265,7 @@ app.all("/api/agent/grocery-request", async (req, res) => {
       unmatched_items: matched.filter((item) => !item.matches.length),
       matched_items: matched,
       recommendation,
-      note: "Prices and availability can change. Product cards show the best information the source exposes. Verify final checkout price before buying."
+      note: "Prices and availability can change. If the basket is partial, the estimate only covers matched items. Verify final checkout price before buying."
     });
   } catch (error) {
     res.status(500).json({ error: "GROCERY_AGENT_FAILED", message: error.message });
