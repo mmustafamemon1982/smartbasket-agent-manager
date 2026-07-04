@@ -223,6 +223,12 @@ function scoreRowForItem(row, item) {
     if (String(row.product || "").toLowerCase().includes(itemNeedle.replace(/s$/, ""))) score += 20;
   }
 
+  if (row.is_regular_price_layer) {
+    if (String(row.item || "").toLowerCase() === itemNeedle) score += 35;
+    if (String(row.price_type || "").includes("estimated")) score -= 8;
+    if (String(row.price_type || "") === "regular_price") score += 10;
+  }
+
   if (item.brand && item.brand !== "Any") {
     if (haystack.includes(item.brand.toLowerCase())) score += 25;
     else score -= 10;
@@ -358,6 +364,10 @@ function optimiseMatchedBasket({ matchedItems, storeRules, area = "Saar", maxSto
         image_url: chosen.image_url || null,
         source_url: chosen.source_url || null,
         source_note: chosen.source_note || null,
+        price_type: chosen.price_type || (String(chosen.source || "").includes("requested_item_online_price_card") ? "offer_price" : "price"),
+        source_type: chosen.source_type || chosen.source || null,
+        last_verified: chosen.last_verified || chosen.last_checked || null,
+        is_regular_price_layer: chosen.is_regular_price_layer === true,
         is_exact_brand: item.brand === "Any" || String(chosen.brand || "").toLowerCase() === String(item.brand || "").toLowerCase() || String(chosen.product || "").toLowerCase().includes(String(item.brand || "").toLowerCase())
       });
     }

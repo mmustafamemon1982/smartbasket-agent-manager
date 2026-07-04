@@ -26,6 +26,10 @@ const {
   getLastD4DRequestDiagnostics
 } = require("./connectors/d4dRequestSearchConnector");
 
+const {
+  rowsForArea: getRegularPriceRows
+} = require("./regularPrices");
+
 const app = express();
 const port = process.env.PORT || 8787;
 
@@ -241,6 +245,9 @@ app.all("/api/agent/grocery-request", async (req, res) => {
       prices = [...requestSearchRows, ...prices];
     }
 
+    const regularPriceRows = getRegularPriceRows(area);
+    prices = [...requestSearchRows, ...regularPriceRows, ...prices];
+
     const storeRules = await getStoreRules(area);
 
     const matched = matchGroceryItems(parsed.items, prices);
@@ -258,6 +265,11 @@ app.all("/api/agent/grocery-request", async (req, res) => {
       location_mode: "area_based",
       request_text: text,
       parsed_items: parsed.items,
+      price_layers: {
+        offer_rows_found: requestSearchRows.length,
+        regular_rows_loaded: regularPriceRows.length,
+        stored_rows_loaded: prices.length - requestSearchRows.length - regularPriceRows.length
+      },
       request_search: {
         enabled: process.env.REQUEST_SEARCH_ENABLED !== "false",
         rows_found: requestSearchRows.length
@@ -303,6 +315,23 @@ app.all("/api/agent/d4d-request-search", async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: "D4D_REQUEST_SEARCH_FAILED", message: error.message });
+  }
+});
+
+
+app.get("/api/regular-prices", async (req, res) => {
+  try {
+    const area = String(req.query.area || "ALL");
+    const rows = getRegularPriceRows(area);
+    res.json({
+      ok: true,
+      area,
+      count: rows.length,
+      rows,
+      note: "Regular price layer. Replace starter values with verified store prices before production."
+    });
+  } catch (error) {
+    res.status(500).json({ error: "REGULAR_PRICE_FETCH_FAILED", message: error.message });
   }
 });
 
