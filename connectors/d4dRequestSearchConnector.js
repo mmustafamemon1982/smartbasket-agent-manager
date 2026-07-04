@@ -1,7 +1,7 @@
 // connectors/d4dRequestSearchConnector.js
-// SmartBasket v6 request-specific online price search.
-// Fixes v5 by using Node's built-in HTTPS client instead of global fetch.
-// Also keeps diagnostics so we can see whether D4D returned product cards to Render.
+// SmartBasket v7 request-specific online price search.
+// Fixes Render error: certificate has expired.
+// Uses Node HTTPS and temporarily disables TLS verification only for this D4D public price fetcher.
 
 const https = require("https");
 const http = require("http");
@@ -104,7 +104,7 @@ function requestText(url, redirectsLeft = 3) {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith("https:") ? https : http;
 
-    const req = lib.get(url, {
+    const requestOptions = {
       headers: {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 SmartBasketBH/1.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -112,7 +112,18 @@ function requestText(url, redirectsLeft = 3) {
         "Cache-Control": "no-cache"
       },
       timeout: 15000
-    }, (res) => {
+    };
+
+    // v7 temporary workaround:
+    // D4D is currently returning an expired TLS certificate to Render/Node.
+    // Browsers may still show the page, but Node rejects it.
+    // We disable TLS verification ONLY for this D4D public price fetcher.
+    // Set D4D_IGNORE_TLS_ERRORS=false in Render to turn this off later.
+    if (url.startsWith("https:") && process.env.D4D_IGNORE_TLS_ERRORS !== "false") {
+      requestOptions.rejectUnauthorized = false;
+    }
+
+    const req = lib.get(url, requestOptions, (res) => {
       const status = res.statusCode || 0;
 
       if ([301, 302, 303, 307, 308].includes(status) && res.headers.location && redirectsLeft > 0) {
@@ -299,7 +310,8 @@ async function fetchD4DRequestRows(items, { limitPerItem = 8 } = {}) {
         rows_extracted: 0,
         expired_or_unavailable: false,
         error: null,
-        excerpt: null
+        excerpt: null,
+        tls_ignore_enabled: process.env.D4D_IGNORE_TLS_ERRORS !== "false"
       };
 
       try {
