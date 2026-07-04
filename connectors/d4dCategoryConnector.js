@@ -537,6 +537,12 @@ function extractProductsFromJson(jsonValue, category, limit) {
 }
 
 function extractProductsFromHtmlFallback(html, category, limit) {
+  // Fallback text extraction can accidentally pick page filters/navigation as product names.
+  // Keep it OFF unless explicitly enabled in Render.
+  if (process.env.D4D_ALLOW_FALLBACK !== "true") {
+    return [];
+  }
+
   const products = [];
   const seen = new Set();
 
@@ -565,7 +571,14 @@ function extractProductsFromHtmlFallback(html, category, limit) {
       lower.includes("terms") ||
       lower.includes("copyright") ||
       lower.includes("download") ||
-      rawTitle.length < 12
+      lower.includes("sort by") ||
+      lower.includes("price range") ||
+      lower.includes("newest first") ||
+      lower.includes("expiring soon") ||
+      lower.includes("offers in bahrain") ||
+      lower.includes("view product") ||
+      rawTitle.length < 12 ||
+      rawTitle.length > 85
     ) {
       continue;
     }
