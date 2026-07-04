@@ -21,6 +21,10 @@ const {
   optimiseMatchedBasket
 } = require("./shoppingAgent");
 
+const {
+  fetchD4DRequestRows
+} = require("./connectors/d4dRequestSearchConnector");
+
 const app = express();
 const port = process.env.PORT || 8787;
 
@@ -222,7 +226,21 @@ app.all("/api/agent/grocery-request", async (req, res) => {
     }
 
     const parsed = parseGroceryRequest(text);
-    const prices = await getCustomerVisiblePrices();
+
+    // Start with approved stored rows.
+    let prices = await getCustomerVisiblePrices();
+
+    // v5: request-specific online price search.
+    // This searches only the customer's requested items.
+    // Keep it enabled by default; set REQUEST_SEARCH_ENABLED=false to disable.
+    let requestSearchRows = [];
+    if (process.env.REQUEST_SEARCH_ENABLED !== "false") {
+      requestSearchRows = await fetchD4DRequestRows(parsed.items, {
+        limitPerItem: Number(process.env.REQUEST_SEARCH_LIMIT_PER_ITEM || 8)
+      });
+      prices = [...requestSearchRows, ...prices];
+    }
+
     const storeRules = await getStoreRules(area);
 
     const matched = matchGroceryItems(parsed.items, prices);
@@ -240,13 +258,50 @@ app.all("/api/agent/grocery-request", async (req, res) => {
       delivery,
       request_text: text,
       parsed_items: parsed.items,
+      request_search: {
+        enabled: process.env.REQUEST_SEARCH_ENABLED !== "false",
+        rows_found: requestSearchRows.length
+      },
       unmatched_items: matched.filter((item) => !item.matches.length),
       matched_items: matched,
       recommendation,
-      note: "Prices and availability can change. Verify final checkout price before buying."
+      note: "Prices and availability can change. Some source pages expose item-level price cards rather than exact SKU names. Verify final checkout price before buying."
     });
   } catch (error) {
     res.status(500).json({ error: "GROCERY_AGENT_FAILED", message: error.message });
+  }
+});
+
+
+app.all("/api/agent/d4d-request-search", async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
+  try {
+    const text = String(req.body?.text || req.query.text || req.query.q || "").trim();
+    if (!text) {
+      res.status(400).json({
+        error: "MISSING_TEXT",
+        message: "Provide text, for example: ?text=Need 30 eggs, 2 Lusine bread and 3 croissants"
+      });
+      return;
+    }
+
+    const parsed = parseGroceryRequest(text);
+    const rows = await fetchD4DRequestRows(parsed.items, {
+      limitPerItem: Number(req.query.limitPerItem || process.env.REQUEST_SEARCH_LIMIT_PER_ITEM || 8)
+    });
+
+    res.json({
+      ok: true,
+      parsed_items: parsed.items,
+      count: rows.length,
+      rows
+    });
+  } catch (error) {
+    res.status(500).json({ error: "D4D_REQUEST_SEARCH_FAILED", message: error.message });
   }
 });
 

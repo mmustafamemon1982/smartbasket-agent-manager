@@ -242,6 +242,11 @@ function scoreRowForItem(row, item) {
     else score -= 10;
   }
 
+  if (String(row.source || "").toLowerCase().includes("requested_item_online_price_card")) {
+    if (String(row.item || "").toLowerCase() === itemNeedle) score += 45;
+    if (String(row.product || "").toLowerCase().includes(itemNeedle.replace(/s$/, ""))) score += 20;
+  }
+
   if (item.item === "eggs") {
     if (haystack.includes("egg")) score += 25;
     if (Number(item.quantity) === 30 && haystack.includes("30")) score += 20;
@@ -311,6 +316,19 @@ function combinations(list, max) {
   return out;
 }
 
+function pricingQuantity(item, chosen) {
+  // If customer says "30 eggs", treat that as a requested tray/pack of 30 eggs for pricing,
+  // not 30 separate egg packs.
+  if (item.item === "eggs" && Number(item.quantity || 0) >= 12) return 1;
+
+  return Number(item.quantity || 1);
+}
+
+function displayQuantity(item, chosen) {
+  if (item.item === "eggs" && Number(item.quantity || 0) >= 12) return 1;
+  return Number(item.quantity || 1);
+}
+
 function optimiseMatchedBasket({ matchedItems, storeRules, area = "Saar", delivery = true, maxStores = 2 }) {
   const unmatched = matchedItems.filter((item) => !item.matches.length);
   const matchable = matchedItems.filter((item) => item.matches.length);
@@ -344,18 +362,21 @@ function optimiseMatchedBasket({ matchedItems, storeRules, area = "Saar", delive
       }
 
       const chosen = possible.sort((a, b) => Number(a.price) - Number(b.price))[0];
+      const qtyForPricing = pricingQuantity(item, chosen);
       selected.push({
         request: item.original,
         item: item.item,
-        quantity: item.quantity,
+        requested_quantity: item.quantity,
+        quantity: displayQuantity(item, chosen),
         store: chosen.store,
         brand: chosen.brand,
         product: chosen.product,
         size: chosen.size,
         unit_price: Number(chosen.price || 0),
-        line_total: Number(chosen.price || 0) * Number(item.quantity || 1),
+        line_total: Number(chosen.price || 0) * qtyForPricing,
         confidence: chosen.confidence || "Medium",
-        score: chosen.score
+        score: chosen.score,
+        source_note: chosen.source_note || null
       });
     }
 
