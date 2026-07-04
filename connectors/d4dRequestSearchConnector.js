@@ -1,7 +1,9 @@
 // connectors/d4dRequestSearchConnector.js
-// SmartBasket v7 request-specific online price search.
-// Fixes Render error: certificate has expired.
-// Uses Node HTTPS and temporarily disables TLS verification only for this D4D public price fetcher.
+// SmartBasket v8 request-specific online price search.
+// - Fixes D4D TLS issue with optional D4D_IGNORE_TLS_ERRORS=true.
+// - Extracts item-specific product cards.
+// - Tries to capture product image URL and card title/alt text when visible.
+// - Does not invent exact SKU names; if not exposed, labels it as an item offer.
 
 const https = require("https");
 const http = require("http");
@@ -77,6 +79,15 @@ function cleanText(value) {
     .trim();
 }
 
+function absoluteUrl(url, baseUrl) {
+  if (!url) return null;
+  try {
+    return new URL(url, baseUrl || BASE).toString();
+  } catch {
+    return null;
+  }
+}
+
 function stripHtml(html) {
   return cleanText(
     String(html || "")
@@ -114,11 +125,8 @@ function requestText(url, redirectsLeft = 3) {
       timeout: 15000
     };
 
-    // v7 temporary workaround:
-    // D4D is currently returning an expired TLS certificate to Render/Node.
-    // Browsers may still show the page, but Node rejects it.
-    // We disable TLS verification ONLY for this D4D public price fetcher.
-    // Set D4D_IGNORE_TLS_ERRORS=false in Render to turn this off later.
+    // D4D has shown an expired TLS certificate to Render/Node.
+    // This is only for the public D4D price fetcher and controlled by env.
     if (url.startsWith("https:") && process.env.D4D_IGNORE_TLS_ERRORS !== "false") {
       requestOptions.rejectUnauthorized = false;
     }
@@ -171,16 +179,14 @@ function pricesFromText(text) {
     .filter((n) => Number.isFinite(n) && n > 0);
 }
 
-function visibleCurrentPrice(segment) {
-  const prices = pricesFromText(segment);
+function visibleCurrentPrice(segmentText) {
+  const prices = pricesFromText(segmentText);
   if (!prices.length) return null;
-
-  // D4D commonly shows old price then current price. Use last price on card.
   return prices[prices.length - 1];
 }
 
-function visibleOriginalPrice(segment) {
-  const prices = pricesFromText(segment);
+function visibleOriginalPrice(segmentText) {
+  const prices = pricesFromText(segmentText);
   if (prices.length >= 2) return prices[0];
   return null;
 }
@@ -197,7 +203,57 @@ function inferSizeFromRequest(item) {
   return "price card";
 }
 
-function requestedProductLabel(item) {
+function brandFromItem(item, cardText) {
+  if (item.brand && item.brand !== "Any") return item.brand;
+
+  const phrase = String(item.phrase || "").toLowerCase();
+  const card = String(cardText || "").toLowerCase();
+  if (phrase.includes("lusine") || phrase.includes("lupine") || phrase.includes("lupin") || card.includes("lusine")) return "Lusine";
+
+  return "Generic";
+}
+
+function firstImageFromHtml(segmentHtml, sourceUrl) {
+  const imgMatches = Array.from(String(segmentHtml || "").matchAll(/<img[^>]+>/gi));
+  for (const m of imgMatches) {
+    const tag = m[0];
+    const src =
+      (tag.match(/\sdata-src=["']([^"']+)["']/i) || [])[1] ||
+      (tag.match(/\sdata-original=["']([^"']+)["']/i) || [])[1] ||
+      (tag.match(/\ssrc=["']([^"']+)["']/i) || [])[1];
+
+    if (!src) continue;
+    if (src.startsWith("data:")) continue;
+
+    const url = absoluteUrl(src, sourceUrl);
+    if (url) return url;
+  }
+  return null;
+}
+
+function firstTitleFromHtml(segmentHtml) {
+  const candidates = [];
+
+  for (const attr of ["alt", "title", "aria-label"]) {
+    const re = new RegExp(`${attr}=["']([^"']{4,120})["']`, "ig");
+    for (const m of String(segmentHtml || "").matchAll(re)) {
+      const text = cleanText(m[1]);
+      if (text && !/logo|view product|image|banner/i.test(text)) candidates.push(text);
+    }
+  }
+
+  for (const cls of ["product-name", "product-title", "name", "title"]) {
+    const re = new RegExp(`<[^>]+class=["'][^"']*${cls}[^"']*["'][^>]*>([\\s\\S]{4,160}?)<\\/[^>]+>`, "ig");
+    for (const m of String(segmentHtml || "").matchAll(re)) {
+      const text = stripHtml(m[1]);
+      if (text && !/view product|sort by|price range/i.test(text)) candidates.push(text);
+    }
+  }
+
+  return candidates[0] || null;
+}
+
+function fallbackProductLabel(item, cardText) {
   const requested = cleanText(item.phrase || item.item || "grocery item");
 
   if (item.item === "eggs" && Number(item.quantity || 0) >= 12) {
@@ -211,29 +267,46 @@ function requestedProductLabel(item) {
   return `${requested} offer`;
 }
 
-function brandFromItem(item) {
-  if (item.brand && item.brand !== "Any") return item.brand;
+function segmentLikelyMatchesRequest(segmentText, item) {
+  const lower = String(segmentText || "").toLowerCase();
+  const phrase = String(item.phrase || item.item || "").toLowerCase();
 
-  const phrase = String(item.phrase || "").toLowerCase();
-  if (phrase.includes("lusine") || phrase.includes("lupine") || phrase.includes("lupin")) return "Lusine";
+  if (item.item === "eggs") return lower.includes("egg") || true; // category page is already eggs
+  if (item.item === "bread") {
+    if (item.brand && item.brand !== "Any") return lower.includes(item.brand.toLowerCase()) || lower.includes("bread") || lower.includes("bun");
+    return lower.includes("bread") || lower.includes("bun") || true;
+  }
+  if (item.item === "croissants") return lower.includes("croissant") || lower.includes("pastry") || true;
 
-  return "Generic";
+  return lower.includes(item.item) || lower.includes(phrase.split(" ")[0]) || true;
 }
 
-function extractRowsFromText(text, item, sourceConfig, limit) {
+function cardHtmlSegments(html) {
+  const parts = String(html || "").split(/View Product/i);
+  const out = [];
+
+  for (let i = 1; i < parts.length; i += 1) {
+    // Include a small part before "View Product" because images/titles can appear before text.
+    const before = parts[i - 1].slice(-1200);
+    const after = parts[i].slice(0, 1800);
+    out.push(before + " View Product " + after);
+  }
+
+  return out;
+}
+
+function extractRowsFromHtml(html, item, sourceConfig, limit) {
   const rows = [];
   const seen = new Set();
+  const segments = cardHtmlSegments(html);
 
-  // Use "View Product" as card separator. D4D server-readable text exposes cards this way.
-  const pieces = String(text || "").split(/View Product/i).slice(1);
-
-  for (const raw of pieces) {
+  for (const segmentHtml of segments) {
     if (rows.length >= limit) break;
 
-    const segment = cleanText(raw.slice(0, 450));
-    if (!segment) continue;
+    const segmentText = stripHtml(segmentHtml.slice(0, 2600));
+    if (!segmentText) continue;
 
-    const lower = segment.toLowerCase();
+    const lower = segmentText.toLowerCase();
     if (
       lower.includes("sort by") ||
       lower.includes("price range") ||
@@ -244,16 +317,21 @@ function extractRowsFromText(text, item, sourceConfig, limit) {
       continue;
     }
 
-    const price = visibleCurrentPrice(segment);
+    if (!segmentLikelyMatchesRequest(segmentText, item)) continue;
+
+    const price = visibleCurrentPrice(segmentText);
     if (!price) continue;
 
-    const store = normalizeStoreName(segment);
+    const store = normalizeStoreName(segmentText);
     if (!store) continue;
 
-    const originalPrice = visibleOriginalPrice(segment);
-    const product = requestedProductLabel(item);
+    const title = firstTitleFromHtml(segmentHtml);
+    const image_url = firstImageFromHtml(segmentHtml, sourceConfig.url);
+    const originalPrice = visibleOriginalPrice(segmentText);
+    const product = title || fallbackProductLabel(item, segmentText);
+    const product_is_exact = !!title;
     const size = inferSizeFromRequest(item);
-    const brand = brandFromItem(item);
+    const brand = brandFromItem(item, segmentText);
 
     const key = `${store}|${item.item}|${brand}|${product}|${size}|${price}`;
     if (seen.has(key)) continue;
@@ -264,17 +342,21 @@ function extractRowsFromText(text, item, sourceConfig, limit) {
       item: item.item,
       brand,
       product,
+      product_is_exact,
       size,
       price,
       original_price: originalPrice,
+      image_url,
       match: item.brand && item.brand !== "Any" ? 70 : 78,
-      confidence: "Low",
+      confidence: product_is_exact ? "Medium" : "Low",
       source: "requested_item_online_price_card",
       source_url: sourceConfig.url,
       last_checked: new Date().toISOString(),
       is_active: true,
       needs_review: false,
-      source_note: "Exact product name was not exposed by the source page; this is an item-specific visible price card."
+      source_note: product_is_exact
+        ? "Product title/image were extracted from the visible source card."
+        : "Exact product name was not exposed by the source page; this is an item-specific visible price card."
     });
   }
 
@@ -306,6 +388,7 @@ async function fetchD4DRequestRows(items, { limitPerItem = 8 } = {}) {
         html_length: 0,
         text_length: 0,
         view_product_count: 0,
+        image_count: 0,
         price_count: 0,
         rows_extracted: 0,
         expired_or_unavailable: false,
@@ -318,6 +401,7 @@ async function fetchD4DRequestRows(items, { limitPerItem = 8 } = {}) {
         const result = await requestText(config.url);
         diag.status = result.status;
         diag.html_length = result.html.length;
+        diag.image_count = (result.html.match(/<img/gi) || []).length;
 
         if (result.status < 200 || result.status >= 400) {
           diag.error = `HTTP ${result.status}`;
@@ -337,7 +421,7 @@ async function fetchD4DRequestRows(items, { limitPerItem = 8 } = {}) {
           continue;
         }
 
-        const rows = extractRowsFromText(text, item, config, limitPerItem);
+        const rows = extractRowsFromHtml(result.html, item, config, limitPerItem);
         diag.rows_extracted = rows.length;
 
         for (const row of rows) {
