@@ -7,7 +7,8 @@ const { randomUUID } = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 const {
   fetchD4DCategoryRows,
-  listD4DCategories
+  listD4DCategories,
+  validateD4DRowIsActive
 } = require("./connectors/d4dCategoryConnector");
 
 function makeSupabaseAdmin() {
@@ -222,6 +223,19 @@ async function runAgentOnce() {
 
       const existing = await findExistingPrice(supabase, row);
       row = reviewIfSuspicious(row, existing);
+
+      if (String(row.source || "").toLowerCase().includes("d4d")) {
+        const validation = await validateD4DRowIsActive(row);
+        if (!validation.active) {
+          row = {
+            ...row,
+            is_active: false,
+            needs_review: true,
+            confidence: "Low",
+            review_reason: validation.reason || "expired_or_unavailable_source_page"
+          };
+        }
+      }
 
       const { error } = await supabase
         .from("prices")

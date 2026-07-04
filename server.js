@@ -13,6 +13,7 @@ const {
   fetchD4DCategoryPreview,
   listD4DCategoriesPreview
 } = require("./agent");
+const { validateD4DRowIsActive } = require("./connectors/d4dCategoryConnector");
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -407,6 +408,79 @@ app.all("/api/admin/cleanup-noisy-prices", async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: "CLEANUP_FAILED", message: error.message });
+  }
+});
+
+
+// Deactivates rows whose source pages are expired or unavailable.
+app.all("/api/admin/cleanup-expired-prices", async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "UNAUTHORIZED" });
+    return;
+  }
+
+  try {
+    const supabase = makeSupabaseAdmin();
+
+    const { data, error } = await supabase
+      .from("prices")
+      .select("store,item,brand,product,size,source,source_url,is_active")
+      .eq("is_active", true);
+
+    if (error) throw error;
+
+    const rows = data || [];
+    let checked = 0;
+    let expired = 0;
+    let deactivated = 0;
+    const examples = [];
+
+    for (const row of rows) {
+      if (!String(row.source || "").toLowerCase().includes("d4d")) continue;
+
+      checked += 1;
+      const validation = await validateD4DRowIsActive(row);
+
+      if (!validation.active) {
+        expired += 1;
+
+        const { error: updateError } = await supabase
+          .from("prices")
+          .update({
+            is_active: false,
+            needs_review: true,
+            review_reason: validation.reason || "Expired/unavailable source page",
+            updated_at: new Date().toISOString()
+          })
+          .eq("store", row.store)
+          .eq("item", row.item)
+          .eq("brand", row.brand)
+          .eq("product", row.product)
+          .eq("size", row.size);
+
+        if (!updateError) {
+          deactivated += 1;
+          if (examples.length < 10) {
+            examples.push({
+              store: row.store,
+              product: row.product,
+              reason: validation.reason
+            });
+          }
+        }
+      }
+    }
+
+    res.json({
+      ok: true,
+      scanned: rows.length,
+      d4d_checked: checked,
+      expired_found: expired,
+      deactivated,
+      examples
+    });
+  } catch (error) {
+    res.status(500).json({ error: "EXPIRED_CLEANUP_FAILED", message: error.message });
   }
 });
 
