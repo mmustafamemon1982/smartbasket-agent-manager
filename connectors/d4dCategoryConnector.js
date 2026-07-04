@@ -117,78 +117,6 @@ function cleanText(value) {
     .trim();
 }
 
-
-function monthNumber(name) {
-  const m = String(name || "").toLowerCase().slice(0, 3);
-  const months = {
-    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
-    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
-  };
-  return months[m];
-}
-
-function parseTillDate(text) {
-  const now = new Date();
-  const clean = cleanText(text);
-
-  const match = clean.match(/\b(?:till|until|valid\s+until)\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)(?:\s+(\d{4}))?/i);
-  if (!match) return null;
-
-  const day = Number(match[1]);
-  const month = monthNumber(match[2]);
-  const year = match[3] ? Number(match[3]) : now.getFullYear();
-
-  if (!Number.isFinite(day) || month == null) return null;
-
-  return new Date(year, month, day, 23, 59, 59);
-}
-
-function pageLooksExpired(html) {
-  const text = cleanText(
-    String(html || "")
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-  );
-
-  const lower = text.toLowerCase();
-
-  if (lower.includes("expired flyers")) return true;
-  if (lower.includes("expired ") || lower.includes(" expired")) return true;
-  if (lower.includes("sorry, this flyer not available")) return true;
-  if (lower.includes("more offers coming up") && lower.includes("expired")) return true;
-
-  const tillDate = parseTillDate(text);
-  if (tillDate && tillDate.getTime() < Date.now()) return true;
-
-  return false;
-}
-
-async function validateD4DRowIsActive(row) {
-  const url = row && row.source_url;
-  const source = String(row && row.source || "").toLowerCase();
-
-  if (!source.includes("d4d")) {
-    return { active: true, reason: "not_d4d" };
-  }
-
-  if (!url || !String(url).startsWith("http")) {
-    return { active: false, reason: "missing_source_url" };
-  }
-
-  try {
-    const html = await fetchPage(url);
-
-    if (pageLooksExpired(html)) {
-      return { active: false, reason: "expired_or_unavailable_source_page" };
-    }
-
-    return { active: true, reason: "active_source_page" };
-  } catch (error) {
-    return { active: true, reason: "could_not_verify_source_page" };
-  }
-}
-
 function absoluteUrl(href) {
   if (!href) return BASE;
   if (href.startsWith("http")) return href;
@@ -725,11 +653,6 @@ async function fetchCategoryRows(category, limitPerCategory) {
 
     try {
       const html = await fetchPage(url);
-
-      if (pageLooksExpired(html)) {
-        continue;
-      }
-
       const blocks = extractJsonScriptBlocks(html);
 
       for (const block of blocks) {
@@ -787,8 +710,5 @@ async function fetchD4DCategoryRows({ limitCategories = 20, limitPerCategory = 4
 
 module.exports = {
   listD4DCategories,
-  fetchD4DCategoryRows,
-  validateD4DRowIsActive,
-  pageLooksExpired,
-  parseTillDate
+  fetchD4DCategoryRows
 };
