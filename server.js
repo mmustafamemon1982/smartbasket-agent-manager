@@ -215,7 +215,6 @@ app.all("/api/agent/grocery-request", async (req, res) => {
   try {
     const text = String(req.body?.text || req.query.text || req.query.q || "").trim();
     const area = String(req.body?.area || req.query.area || "Saar");
-    const delivery = String(req.body?.delivery ?? req.query.delivery ?? "true") !== "false";
     const maxStores = Number(req.body?.maxStores || req.query.maxStores || 2);
 
     if (!text) {
@@ -249,14 +248,14 @@ app.all("/api/agent/grocery-request", async (req, res) => {
       matchedItems: matched,
       storeRules,
       area,
-      delivery,
+      location_mode: "area_based",
       maxStores
     });
 
     res.json({
       ok: true,
       area,
-      delivery,
+      location_mode: "area_based",
       request_text: text,
       parsed_items: parsed.items,
       request_search: {
@@ -266,7 +265,7 @@ app.all("/api/agent/grocery-request", async (req, res) => {
       unmatched_items: matched.filter((item) => !item.matches.length),
       matched_items: matched,
       recommendation,
-      note: "Prices and availability can change. Some source pages expose item-level price cards rather than exact SKU names. Verify final checkout price before buying."
+      note: "Prices and availability can change. Product cards show the best information the source exposes. Verify final checkout price before buying."
     });
   } catch (error) {
     res.status(500).json({ error: "GROCERY_AGENT_FAILED", message: error.message });

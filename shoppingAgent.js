@@ -1,11 +1,9 @@
 // shoppingAgent.js
-// Lightweight grocery request agent.
-// v4 parser fix:
-// - Understands "Need 30 eggs" as quantity 30 eggs, not quantity 1.
-// - Removes common request words: need, want, buy, get, add, please, etc.
-// - Keeps brand hints like Lusine/Lupine/Lupin => Lusine.
-// No paid AI API required for MVP.
-// Later this can be upgraded to OpenAI/LLM parsing and item-specific web/API search.
+// SmartBasket v8 grocery request agent.
+// - Parses natural grocery requests.
+// - Optimises basket by product price and location availability.
+// - Does not expose delivery fee/minimum order maths to the customer.
+// - Allows one-store or multi-store economical plan.
 
 const ITEM_ALIASES = {
   egg: "eggs",
@@ -64,13 +62,8 @@ function cleanText(value) {
 
 function stripRequestWords(value) {
   let text = cleanText(value);
-
-  // Remove polite/request prefixes repeatedly.
-  // Examples:
-  // "Need 30 eggs" -> "30 eggs"
-  // "I want 2 milk" -> "2 milk"
-  // "Please add 3 croissants" -> "3 croissants"
   let changed = true;
+
   while (changed) {
     const before = text;
     text = text
@@ -136,8 +129,6 @@ function normaliseQuantity(raw) {
 function parseGroceryRequest(text) {
   const original = cleanText(text);
 
-  // Keep comma separation, but also split normal "and" lists.
-  // We strip words like "Need" per chunk after splitting.
   const normalised = original
     .replace(/\band\b/gi, ",")
     .replace(/\+/g, ",")
@@ -157,22 +148,12 @@ function parseGroceryRequest(text) {
 
     if (!chunk) continue;
 
-    // Examples:
-    // 30 eggs
-    // 2 Lusine bread
-    // 3 croissants
-    // two milk
-    // 1 dozen eggs
-    // eggs 30 pcs
-    // milk 2 ltr
     let match = chunk.match(/^(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen)\s+(.+)$/i);
     let quantity = 1;
     let phrase = chunk;
 
     if (match) {
       quantity = normaliseQuantity(match[1]);
-
-      // Special case: "1 dozen eggs" means 12 eggs, not 1.
       const rest = cleanText(match[2]);
       const dozenMatch = rest.match(/^dozen\s+(.+)$/i);
       if (dozenMatch) {
@@ -237,14 +218,14 @@ function scoreRowForItem(row, item) {
     if (haystack.includes(word)) score += 10;
   }
 
-  if (item.brand && item.brand !== "Any") {
-    if (haystack.includes(item.brand.toLowerCase())) score += 25;
-    else score -= 10;
-  }
-
   if (String(row.source || "").toLowerCase().includes("requested_item_online_price_card")) {
     if (String(row.item || "").toLowerCase() === itemNeedle) score += 45;
     if (String(row.product || "").toLowerCase().includes(itemNeedle.replace(/s$/, ""))) score += 20;
+  }
+
+  if (item.brand && item.brand !== "Any") {
+    if (haystack.includes(item.brand.toLowerCase())) score += 25;
+    else score -= 10;
   }
 
   if (item.item === "eggs") {
@@ -254,7 +235,7 @@ function scoreRowForItem(row, item) {
 
   if (item.item === "croissants") {
     if (haystack.includes("croissant")) score += 30;
-    if (haystack.includes("bakery")) score += 5;
+    if (haystack.includes("bakery") || haystack.includes("pastry")) score += 5;
   }
 
   if (item.item === "bread") {
@@ -277,7 +258,7 @@ function matchGroceryItems(items, priceRows) {
         if (b.score !== a.score) return b.score - a.score;
         return Number(a.price || 0) - Number(b.price || 0);
       })
-      .slice(0, 8);
+      .slice(0, 12);
 
     return {
       ...item,
@@ -291,10 +272,7 @@ function ruleFor(storeRules, store, area) {
   return (storeRules || []).find((rule) => rule.store === store && rule.area === area) || {
     store,
     area,
-    is_available: true,
-    delivery_fee: 0,
-    free_delivery_above: 0,
-    minimum_order: 0
+    is_available: true
   };
 }
 
@@ -316,20 +294,18 @@ function combinations(list, max) {
   return out;
 }
 
-function pricingQuantity(item, chosen) {
-  // If customer says "30 eggs", treat that as a requested tray/pack of 30 eggs for pricing,
-  // not 30 separate egg packs.
-  if (item.item === "eggs" && Number(item.quantity || 0) >= 12) return 1;
-
-  return Number(item.quantity || 1);
-}
-
-function displayQuantity(item, chosen) {
+function pricingQuantity(item) {
+  // "30 eggs" means one requested 30-egg tray/pack/card, not 30 separate packs.
   if (item.item === "eggs" && Number(item.quantity || 0) >= 12) return 1;
   return Number(item.quantity || 1);
 }
 
-function optimiseMatchedBasket({ matchedItems, storeRules, area = "Saar", delivery = true, maxStores = 2 }) {
+function displayQuantity(item) {
+  if (item.item === "eggs" && Number(item.quantity || 0) >= 12) return 1;
+  return Number(item.quantity || 1);
+}
+
+function optimiseMatchedBasket({ matchedItems, storeRules, area = "Saar", maxStores = 2 }) {
   const unmatched = matchedItems.filter((item) => !item.matches.length);
   const matchable = matchedItems.filter((item) => item.matches.length);
 
@@ -362,20 +338,25 @@ function optimiseMatchedBasket({ matchedItems, storeRules, area = "Saar", delive
       }
 
       const chosen = possible.sort((a, b) => Number(a.price) - Number(b.price))[0];
-      const qtyForPricing = pricingQuantity(item, chosen);
+      const qtyForPricing = pricingQuantity(item);
+
       selected.push({
         request: item.original,
         item: item.item,
         requested_quantity: item.quantity,
-        quantity: displayQuantity(item, chosen),
+        quantity: displayQuantity(item),
         store: chosen.store,
         brand: chosen.brand,
         product: chosen.product,
+        product_is_exact: chosen.product_is_exact === true,
         size: chosen.size,
         unit_price: Number(chosen.price || 0),
+        original_price: chosen.original_price || null,
         line_total: Number(chosen.price || 0) * qtyForPricing,
         confidence: chosen.confidence || "Medium",
         score: chosen.score,
+        image_url: chosen.image_url || null,
+        source_url: chosen.source_url || null,
         source_note: chosen.source_note || null
       });
     }
@@ -388,43 +369,23 @@ function optimiseMatchedBasket({ matchedItems, storeRules, area = "Saar", delive
       return acc;
     }, {});
 
-    let deliveryCost = 0;
-    let minimumGap = 0;
-    const storeBreakdown = {};
-
-    for (const [store, storeGoods] of Object.entries(byStore)) {
-      const rule = ruleFor(storeRules, store, area);
-      const storeDelivery = delivery && storeGoods < Number(rule.free_delivery_above || 0)
-        ? Number(rule.delivery_fee || 0)
-        : 0;
-      const storeGap = storeGoods < Number(rule.minimum_order || 0)
-        ? Number(rule.minimum_order || 0) - storeGoods
-        : 0;
-
-      deliveryCost += storeDelivery;
-      minimumGap += storeGap;
-
-      storeBreakdown[store] = {
-        goods: storeGoods,
-        delivery: storeDelivery,
-        minimum_gap: storeGap,
-        minimum_order: Number(rule.minimum_order || 0),
-        free_delivery_above: Number(rule.free_delivery_above || 0)
-      };
-    }
-
-    const hassleCost = Math.max(0, storeList.length - 1) * 0.5;
-    const total = goods + deliveryCost + minimumGap + hassleCost;
+    // We do not show delivery fee or minimum-order math to customers.
+    // To avoid silly splits, add a tiny convenience penalty in ranking only.
+    const convenience_penalty = Math.max(0, storeList.length - 1) * 0.3;
+    const total = goods + convenience_penalty;
 
     options.push({
       stores: storeList,
       selected,
       goods,
-      delivery: deliveryCost,
-      minimum_gap: minimumGap,
-      hassle_cost: hassleCost,
+      estimated_total: total,
       total,
-      store_breakdown: storeBreakdown
+      convenience_penalty,
+      store_count: storeList.length,
+      location: area,
+      store_breakdown: Object.fromEntries(
+        Object.entries(byStore).map(([store, storeGoods]) => [store, { goods: storeGoods }])
+      )
     });
   }
 
